@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+
+# downloaded Tesseract language data (large binary, fetched via setup steps in README)
+tessdata/
+
+# generated artifacts — output/ and the debug cache may contain real extracted
+# document data (names, addresses) from the user's actual test documents
+output/
+scripts/_debug_opinion_cache.pkl

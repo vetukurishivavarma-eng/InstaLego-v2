@@ -1,0 +1,35 @@
+# LLM client — QwenClient (llm/client.py) POSTs to a remote
+# {LLM_API_BASE_URL}/v1/chat/completions endpoint (e.g. a FastAPI server on
+# Kaggle, tunneled via ngrok). The model itself (Qwen2.5-7B-Instruct,
+# validated in Kaggle: 4-bit nf4 double-quant) runs on that remote server,
+# NOT in this process — no torch/transformers/bitsandbytes needed here.
+requests
+python-dotenv
+
+# Embeddings + vector store (validated) — these still run in-process, and
+# sentence-transformers pulls in torch/transformers itself as a transitive
+# dependency for that purpose only.
+sentence-transformers
+faiss-cpu
+
+# Document intake / OCR
+pypdf
+pdf2image
+pytesseract
+pillow
+
+# Table-aware EC extraction
+pdfplumber
+opencv-python-headless
+
+# Cross-document verification
+rapidfuzz
+
+# Schemas / structured extraction
+pydantic>=2
+
+# PDF opinion export
+fpdf2
+
+# Testing
+pytest

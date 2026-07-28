@@ -128,6 +128,68 @@ def test_extract_structured_parses_json_from_response(mock_post):
     assert result.value == "ok"
 
 
+@patch("landtitle.llm.client.time.sleep")
+@patch("landtitle.llm.client.requests.post")
+def test_generate_retries_on_transient_5xx_then_succeeds(mock_post, mock_sleep):
+    import requests
+
+    first_response = MagicMock()
+    first_response.status_code = 500
+    first_response.text = "GPU still loading"
+    first_response.raise_for_status.side_effect = requests.exceptions.HTTPError(response=first_response)
+    second_response = _mock_response("recovered after retry")
+    second_response.raise_for_status.return_value = None
+    mock_post.side_effect = [first_response, second_response]
+
+    client = QwenClient(base_url="https://example.test")
+    result = client.generate("sys", "user")
+
+    assert result == "recovered after retry"
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once()
+
+
+@patch("landtitle.llm.client.time.sleep")
+@patch("landtitle.llm.client.requests.post")
+def test_generate_exhausts_retries_on_persistent_5xx(mock_post, mock_sleep):
+    import requests
+
+    def make_failing_response():
+        resp = MagicMock()
+        resp.status_code = 503
+        resp.text = "still down"
+        resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=resp)
+        return resp
+
+    # LLM_TRANSIENT_RETRY_ATTEMPTS defaults to 2 -> 3 total attempts.
+    mock_post.side_effect = [make_failing_response() for _ in range(3)]
+
+    client = QwenClient(base_url="https://example.test")
+    with pytest.raises(RuntimeError, match="HTTP 503"):
+        client.generate("sys", "user")
+
+    assert mock_post.call_count == 3
+
+
+@patch("landtitle.llm.client.time.sleep")
+@patch("landtitle.llm.client.requests.post")
+def test_generate_does_not_retry_on_4xx(mock_post, mock_sleep):
+    import requests
+
+    resp = MagicMock()
+    resp.status_code = 400
+    resp.text = "bad request"
+    resp.raise_for_status.side_effect = requests.exceptions.HTTPError(response=resp)
+    mock_post.return_value = resp
+
+    client = QwenClient(base_url="https://example.test")
+    with pytest.raises(RuntimeError, match="HTTP 400"):
+        client.generate("sys", "user")
+
+    assert mock_post.call_count == 1
+    mock_sleep.assert_not_called()
+
+
 @patch("landtitle.llm.client.requests.post")
 def test_extract_structured_retries_on_invalid_json(mock_post):
     mock_post.side_effect = [

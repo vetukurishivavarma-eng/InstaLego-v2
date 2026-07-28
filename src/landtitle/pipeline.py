@@ -10,12 +10,19 @@ is the "proper chunking/pagination strategy" called for in the build spec.
 from __future__ import annotations
 
 import argparse
+import logging
 import re
+from pathlib import Path
 from typing import TypeVar
 
 from pydantic import BaseModel
 
-from landtitle.config import CHUNK_OVERLAP_CHARS, MAX_CHARS_PER_EXTRACTION_CHUNK, MAX_CITATIONS_PER_OPINION
+from landtitle.config import (
+    CHUNK_OVERLAP_CHARS,
+    LOG_LEVEL,
+    MAX_CHARS_PER_EXTRACTION_CHUNK,
+    MAX_CITATIONS_PER_OPINION,
+)
 from landtitle.extraction.encumbrance import extract_encumbrance_certificate
 from landtitle.extraction.revenue_record import extract_revenue_record
 from landtitle.extraction.sale_deed import extract_sale_deed
@@ -33,6 +40,8 @@ from landtitle.verification.checks import (
     owner_chain_continuity_check,
     survey_number_match,
 )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -168,22 +177,33 @@ def _merge_extractions(results: list[T]) -> T:
 
 
 def extract_sale_deed_document(pdf_path: str, client: QwenClient) -> SaleDeed:
+    logger.info("Sale Deed: extracting %s", pdf_path)
     pages = extract_document(pdf_path)
     text = full_text(pages)
     chunks = chunk_text(text, MAX_CHARS_PER_EXTRACTION_CHUNK, CHUNK_OVERLAP_CHARS)
-    results = [extract_sale_deed(chunk, client) for chunk in chunks]
+    logger.info("Sale Deed: %d page(s) -> %d extraction chunk(s)", len(pages), len(chunks))
+    results = []
+    for i, chunk in enumerate(chunks, start=1):
+        logger.info("Sale Deed: extracting chunk %d/%d", i, len(chunks))
+        results.append(extract_sale_deed(chunk, client))
     return _merge_extractions(results)
 
 
 def extract_revenue_record_document(pdf_path: str, client: QwenClient) -> RevenueRecord:
+    logger.info("Revenue Record: extracting %s", pdf_path)
     pages = extract_document(pdf_path)
     text = full_text(pages)
     chunks = chunk_text(text, MAX_CHARS_PER_EXTRACTION_CHUNK, CHUNK_OVERLAP_CHARS)
-    results = [extract_revenue_record(chunk, client) for chunk in chunks]
+    logger.info("Revenue Record: %d page(s) -> %d extraction chunk(s)", len(pages), len(chunks))
+    results = []
+    for i, chunk in enumerate(chunks, start=1):
+        logger.info("Revenue Record: extracting chunk %d/%d", i, len(chunks))
+        results.append(extract_revenue_record(chunk, client))
     return _merge_extractions(results)
 
 
 def extract_ec_document(pdf_path: str, client: QwenClient) -> EncumbranceCertificate:
+    logger.info("Encumbrance Certificate: extracting %s", pdf_path)
     pages = extract_document(pdf_path)
     return extract_encumbrance_certificate(pdf_path, pages, client)
 
@@ -208,6 +228,7 @@ def run_verification(
     if ec is not None:
         flags += active_encumbrance_check(ec)
 
+    logger.info("Verification: %d flag(s) found", len(flags))
     return flags
 
 
@@ -235,7 +256,12 @@ def select_citations(
             if chunk.citation_label not in seen_labels:
                 citations.append(chunk)
                 seen_labels.add(chunk.citation_label)
-    return citations[:max_citations]
+    citations = citations[:max_citations]
+    logger.info(
+        "Legal retrieval: %d quer(y/ies) -> %d citation(s) (capped at %d)",
+        len(queries), len(citations), max_citations,
+    )
+    return citations
 
 
 def run_pipeline(
@@ -251,12 +277,21 @@ def run_pipeline(
     client = client or QwenClient()
     retriever = retriever or LegalRetriever()
 
+    # Each stage below is a real place this has failed before (a stalled
+    # Kaggle tunnel mid-extraction, a GPU OOM during citation retrieval) --
+    # logging which stage we're entering means a crash's traceback is
+    # preceded by "which stage were we in," not just a bare stack trace deep
+    # inside requests/pydantic.
+    logger.info("=== Stage: extraction (%d Sale Deed(s), revenue_record=%s, ec=%s) ===",
+                len(sale_deed_paths), bool(revenue_record_path), bool(ec_path))
     sale_deeds = [extract_sale_deed_document(p, client) for p in sale_deed_paths]
     revenue_record = extract_revenue_record_document(revenue_record_path, client) if revenue_record_path else None
     ec = extract_ec_document(ec_path, client) if ec_path else None
 
+    logger.info("=== Stage: verification ===")
     flags = run_verification(sale_deeds, revenue_record, ec, survey_number_mapping)
 
+    logger.info("=== Stage: legal citation retrieval ===")
     citations = select_citations(flags, retriever)
 
     facts = {
@@ -265,11 +300,23 @@ def run_pipeline(
         "encumbrance_certificate": ec.model_dump() if ec else None,
     }
 
+    logger.info("=== Stage: opinion generation ===")
     opinion: LegalOpinion = generate_opinion(facts, flags, citations, client)
+    logger.info("=== Pipeline complete ===")
     return opinion, flags
 
 
+def _require_existing_file(path: str, label: str) -> None:
+    if not Path(path).is_file():
+        raise SystemExit(f"{label} not found: {path}")
+
+
 def main() -> None:
+    logging.basicConfig(
+        level=getattr(logging, LOG_LEVEL.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
     parser = argparse.ArgumentParser(description="Land Title Due Diligence Engine")
     parser.add_argument("--sale-deed", action="append", default=[], help="Path to a Sale Deed PDF (repeatable, chronological order)")
     parser.add_argument("--revenue-record", help="Path to a Pahani/Adangal PDF")
@@ -278,6 +325,15 @@ def main() -> None:
     parser.add_argument("--reviewed-by", default=None, help="If set, finalizes the opinion under this reviewer name before export")
     args = parser.parse_args()
 
+    # Fail before the (slow, LLM-driven) pipeline starts rather than deep
+    # inside pypdf on a typo'd path after already spending real time/money
+    # on other documents.
+    for path, label in [(args.revenue_record, "Revenue Record"), (args.ec, "Encumbrance Certificate")]:
+        if path:
+            _require_existing_file(path, label)
+    for path in args.sale_deed:
+        _require_existing_file(path, "Sale Deed")
+
     opinion, flags = run_pipeline(args.sale_deed, args.revenue_record, args.ec)
 
     if args.reviewed_by:
@@ -285,7 +341,7 @@ def main() -> None:
         opinion = finalize_opinion(opinion, args.reviewed_by)
 
     export_opinion_pdf(opinion, args.output)
-    print(f"Wrote {args.output} (draft={opinion.is_draft}); {len(flags)} verification flag(s) found.")
+    logger.info("Wrote %s (draft=%s); %d verification flag(s) found.", args.output, opinion.is_draft, len(flags))
 
 
 if __name__ == "__main__":

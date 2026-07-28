@@ -158,6 +158,27 @@ the product's non-negotiable requirement: this tool is a first-draft
 accelerator for a licensed practitioner, never an autonomous opinion
 generator.
 
+## Logging and resilience
+
+Set `LOG_LEVEL` (default `INFO`) for progress visibility during a run — each
+extraction chunk, OCR page, verification result, legal retrieval, and
+opinion-generation call logs a line, since a real run makes several slow,
+sequential LLM calls against a personal Kaggle+ngrok endpoint with a history
+of transient failures. `run_pipeline()` also logs which of its 4 stages
+(extraction / verification / legal retrieval / opinion generation) it's in,
+so a crash's traceback is preceded by *where* it happened.
+
+`QwenClient.generate()` retries a transient 5xx server response (confirmed
+live: the user's own FastAPI server returned one transient 500 while the
+model was still loading, which succeeded on immediate retry) up to
+`LLM_TRANSIENT_RETRY_ATTEMPTS` times (default 2) with a fixed backoff. A 4xx
+is never retried — the request itself is wrong, not the server's state.
+
+The CLI (`main()`) validates that all provided file paths exist before
+starting the (slow, LLM-driven) pipeline, and missing Tesseract/Poppler
+binaries now raise a clear `RuntimeError` pointing back to this README's
+Setup section, instead of surfacing pytesseract's/pdf2image's raw exception.
+
 ## Key confirmed findings baked into this code (see inline docstrings)
 
 - **EC extraction must be table-aware.** Feeding flattened OCR/prose text of

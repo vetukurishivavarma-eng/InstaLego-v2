@@ -14,6 +14,7 @@ instead of the full `LegalOpinion`).
 from __future__ import annotations
 
 import json
+import logging
 
 from pydantic import BaseModel
 
@@ -21,6 +22,8 @@ from landtitle.config import OPINION_MAX_NEW_TOKENS
 from landtitle.legal.retrieval import RetrievedChunk, build_citation_context
 from landtitle.llm.client import QwenClient
 from landtitle.schemas import ECEntry, Flag, LegalOpinion
+
+logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """You are drafting a preliminary land title due-diligence opinion for review \
 by a licensed legal practitioner. This is a first-draft accelerator, NOT a final legal opinion. \
@@ -83,6 +86,10 @@ def _ensure_all_flags_present(narrative: str, flags: list[Flag]) -> str:
     if not missing:
         return narrative
 
+    logger.warning(
+        "Model omitted %d verified flag(s) from its narrative, re-injecting: %s",
+        len(missing), [f.issue for f in missing],
+    )
     missing_lines = "\n".join(f"- [{f.severity.upper()}] {f.issue}: {f.detail}" for f in missing)
     if narrative.strip().lower() in ("", "no inconsistencies found.", "no inconsistencies found"):
         # The model's narrative added nothing of value on top of the
@@ -114,6 +121,11 @@ def _ensure_all_transactions_present(narrative: str, facts: dict) -> str:
     if not missing:
         return narrative
 
+    logger.warning(
+        "Model omitted %d real Sale Deed transaction(s) from the chain-of-ownership "
+        "narrative, re-injecting: %s",
+        len(missing), [e.document_number for e in missing],
+    )
     missing_lines = "\n".join(
         f"- Document No.{e.document_number}"
         + (f", dated {e.date}" if e.date else "")
@@ -130,6 +142,7 @@ def generate_opinion(
     citations: list[RetrievedChunk],
     client: QwenClient,
 ) -> LegalOpinion:
+    logger.info("Generating opinion: %d flag(s), %d citation(s)", len(flags), len(citations))
     verified_flags_text = (
         "\n".join(f"- [{f.severity.upper()}] {f.issue}: {f.detail}" for f in flags)
         if flags else "(none — no inconsistencies were detected by the verification layer)"

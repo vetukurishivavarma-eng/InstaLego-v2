@@ -62,6 +62,23 @@ OPINION_MAX_NEW_TOKENS = 768
 # --- Name similarity threshold for cross-document fuzzy matching ---
 NAME_SIMILARITY_THRESHOLD = 85  # rapidfuzz token_sort_ratio, 0-100
 
+# --- Logging ---
+# A real run makes several slow, sequential LLM calls against a personal
+# Kaggle+ngrok endpoint with a history of transient failures (tunnel down,
+# server still loading, GPU OOM on an oversized prompt) -- INFO-level
+# progress logging is the difference between "it's stuck" and "it's on
+# chunk 3 of 5 for the Sale Deed." Set LOG_LEVEL=DEBUG for per-call detail.
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO")
+
+# --- Transient LLM-server error retry (generate(), not extract_structured's
+# separate JSON-validation retry) ---
+# Confirmed live: the user's own Kaggle FastAPI server returned a transient
+# 500 once while the model was still loading, which then succeeded on retry
+# with no other change. A 5xx is retried; 4xx (bad request, auth, etc.) is
+# not, since retrying an unfixable request just wastes the same time again.
+LLM_TRANSIENT_RETRY_ATTEMPTS = 2
+LLM_TRANSIENT_RETRY_BACKOFF_SECONDS = 5.0
+
 ACTS = {
     "Transfer of Property Act": ACTS_DIR / "transfer_of_property_act_1882.txt",
     "Registration Act": ACTS_DIR / "registration_act_1908.txt",

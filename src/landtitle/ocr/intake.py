@@ -8,12 +8,15 @@ header/watermark cleanup here.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
 from pypdf import PdfReader
 
 from landtitle.config import OCR_DPI, OCR_LANG
+
+logger = logging.getLogger(__name__)
 
 # A page with fewer than this many extractable characters is treated as
 # image-only (scanned) rather than genuinely near-blank text.
@@ -40,17 +43,35 @@ def ocr_pages(pdf_path: str, page_numbers: list[int], dpi: int = OCR_DPI, lang: 
     """OCR only the given 1-indexed page numbers (avoids re-rendering pages
     that already extracted cleanly as text)."""
     from pdf2image import convert_from_path
+    from pdf2image.exceptions import PDFInfoNotInstalledError
     import pytesseract
 
+    logger.info("OCR: %d page(s) need image-based extraction: %s", len(page_numbers), page_numbers)
     results: dict[int, str] = {}
     for page_number in page_numbers:
-        images = convert_from_path(
-            pdf_path, dpi=dpi, first_page=page_number, last_page=page_number
-        )
+        try:
+            images = convert_from_path(
+                pdf_path, dpi=dpi, first_page=page_number, last_page=page_number
+            )
+        except PDFInfoNotInstalledError as exc:
+            # Confirmed recurring setup friction: Poppler's pdfinfo/pdftoppm
+            # binaries don't ship via pip and are easy to have installed but
+            # not on PATH in a fresh shell -- see README "Setup" section.
+            raise RuntimeError(
+                "Poppler (pdftoppm/pdfinfo) is not on PATH -- required to rasterize scanned "
+                "PDF pages before OCR. See README.md 'Setup' for install/PATH instructions."
+            ) from exc
         if not images:
             results[page_number] = ""
             continue
-        results[page_number] = pytesseract.image_to_string(images[0], lang=lang)
+        try:
+            results[page_number] = pytesseract.image_to_string(images[0], lang=lang)
+        except pytesseract.TesseractNotFoundError as exc:
+            raise RuntimeError(
+                "Tesseract OCR is not on PATH. See README.md 'Setup' for install/PATH "
+                "instructions (including the eng+tel language pack)."
+            ) from exc
+        logger.debug("OCR: page %d -> %d chars", page_number, len(results[page_number]))
     return results
 
 
@@ -73,8 +94,12 @@ def extract_document(pdf_path: str) -> list[PageText]:
     scanned_page_numbers = [p.page_number for p in pages if len(p.text) < MIN_CHARS_FOR_TEXT_PAGE]
 
     if not scanned_page_numbers:
+        logger.info("%s: %d page(s), all text-extractable", pdf_path, len(pages))
         return pages
 
+    logger.info(
+        "%s: %d page(s) total, %d need OCR", pdf_path, len(pages), len(scanned_page_numbers)
+    )
     ocr_results = ocr_pages(pdf_path, scanned_page_numbers)
     final_pages = []
     for p in pages:

@@ -1,8 +1,6 @@
 """Hybrid legal retrieval: exact section-number match (when the query names
 a specific section) + semantic search (FAISS) as fallback/supplement.
 
-This pattern carries over from the SARFAESI module and is proven.
-
 CRITICAL: every retrieved chunk carries a verified `citation_label` derived
 directly from the corpus's own leading section-number pattern (set at
 corpus-build time — see corpus_builder.split_into_sections). This label,
@@ -14,10 +12,13 @@ the retrieved content is correct.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass
 
 from landtitle.config import CORPUS_METADATA_PATH, EMBEDDING_MODEL, FAISS_INDEX_PATH
+
+logger = logging.getLogger(__name__)
 
 _QUERY_SECTION_PATTERN = re.compile(r"section\s+(\d+[A-Z]?)", re.IGNORECASE)
 
@@ -49,14 +50,17 @@ class LegalRetriever:
             return
         import faiss
 
+        logger.info("Loading FAISS index from %s", self.index_path)
         self._index = faiss.read_index(str(self.index_path))
         self._sections = json.loads(self.metadata_path.read_text(encoding="utf-8"))
+        logger.info("Loaded %d indexed section(s)", len(self._sections))
 
     def _ensure_embedder(self) -> None:
         if self._embedder is not None:
             return
         from sentence_transformers import SentenceTransformer
 
+        logger.info("Loading embedding model %s (first call only)", self.embedding_model_name)
         self._embedder = SentenceTransformer(self.embedding_model_name)
 
     def exact_section_lookup(self, section_number: str, act: str | None = None) -> list[RetrievedChunk]:

@@ -14,7 +14,9 @@ problem, not a model-capability problem.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import time
 from typing import TypeVar
 
 import requests
@@ -26,8 +28,12 @@ from landtitle.config import (
     LLM_API_TIMEOUT,
     LLM_MAX_NEW_TOKENS,
     LLM_TEMPERATURE,
+    LLM_TRANSIENT_RETRY_ATTEMPTS,
+    LLM_TRANSIENT_RETRY_BACKOFF_SECONDS,
     MODEL_NAME,
 )
+
+logger = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -78,28 +84,53 @@ class QwenClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        logger.info(
+            "POST %s (prompt=%d chars, max_new_tokens=%d)", url, len(content), max_new_tokens
+        )
+        start = time.monotonic()
         response = None
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
-            response.raise_for_status()
-        except requests.exceptions.Timeout as exc:
-            raise RuntimeError(
-                f"LLM endpoint at {url} did not respond within {self.timeout}s. It may be "
-                f"overloaded, or the Kaggle session behind it may have stalled or restarted."
-            ) from exc
-        except requests.exceptions.ConnectionError as exc:
-            raise RuntimeError(
-                f"Could not reach the LLM endpoint at {url}. The server or ngrok tunnel may be "
-                f"down, or LLM_API_BASE_URL may be stale (ngrok free-tier URLs change every "
-                f"time the Kaggle session restarts)."
-            ) from exc
-        except requests.exceptions.HTTPError as exc:
-            body_preview = response.text[:500] if response is not None else ""
-            raise RuntimeError(
-                f"LLM endpoint at {url} returned HTTP {response.status_code}: {body_preview}"
-            ) from exc
-        except requests.exceptions.RequestException as exc:
-            raise RuntimeError(f"LLM request to {url} failed: {exc}") from exc
+        attempt = 0
+        while True:
+            try:
+                response = requests.post(url, headers=headers, json=payload, timeout=self.timeout)
+                response.raise_for_status()
+                break
+            except requests.exceptions.Timeout as exc:
+                raise RuntimeError(
+                    f"LLM endpoint at {url} did not respond within {self.timeout}s. It may be "
+                    f"overloaded, or the Kaggle session behind it may have stalled or restarted."
+                ) from exc
+            except requests.exceptions.ConnectionError as exc:
+                raise RuntimeError(
+                    f"Could not reach the LLM endpoint at {url}. The server or ngrok tunnel may be "
+                    f"down, or LLM_API_BASE_URL may be stale (ngrok free-tier URLs change every "
+                    f"time the Kaggle session restarts)."
+                ) from exc
+            except requests.exceptions.HTTPError as exc:
+                body_preview = response.text[:500] if response is not None else ""
+                # Only a 5xx is retried -- confirmed live, the user's own
+                # Kaggle FastAPI server returned one transient 500 while the
+                # model was still loading, which succeeded on retry with no
+                # other change. A 4xx means the request itself is wrong
+                # (bad payload, auth) and retrying it just repeats the same
+                # failure.
+                is_server_error = response is not None and 500 <= response.status_code < 600
+                if is_server_error and attempt < LLM_TRANSIENT_RETRY_ATTEMPTS:
+                    attempt += 1
+                    logger.warning(
+                        "LLM endpoint at %s returned HTTP %d (attempt %d/%d), retrying in %.0fs: %s",
+                        url, response.status_code, attempt, LLM_TRANSIENT_RETRY_ATTEMPTS,
+                        LLM_TRANSIENT_RETRY_BACKOFF_SECONDS, body_preview,
+                    )
+                    time.sleep(LLM_TRANSIENT_RETRY_BACKOFF_SECONDS)
+                    continue
+                raise RuntimeError(
+                    f"LLM endpoint at {url} returned HTTP {response.status_code}: {body_preview}"
+                ) from exc
+            except requests.exceptions.RequestException as exc:
+                raise RuntimeError(f"LLM request to {url} failed: {exc}") from exc
+
+        logger.info("Response received in %.1fs", time.monotonic() - start)
 
         try:
             data = response.json()
@@ -140,6 +171,10 @@ class QwenClient:
                 return schema.model_validate(data)
             except (json.JSONDecodeError, ValidationError) as exc:
                 last_error = exc
+                logger.warning(
+                    "extract_structured(%s) failed to parse/validate on attempt %d/%d: %s",
+                    schema.__name__, attempt + 1, max_retries + 1, exc,
+                )
                 schema_prompt = (
                     f"Your previous response could not be parsed as valid JSON matching the "
                     f"schema. Error: {exc}\n\nOriginal request:\n{user_prompt}\n\n"

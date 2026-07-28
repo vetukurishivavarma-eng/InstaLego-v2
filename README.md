@@ -204,6 +204,54 @@ Setup section, instead of surfacing pytesseract's/pdf2image's raw exception.
   recall from memory, which was confirmed to fabricate plausible-sounding
   wrong section numbers even against a clean corpus.
 
+## Web API (local)
+
+`src/landtitle/api/` is a thin FastAPI wrapper around `run_pipeline()` +
+`export_opinion_pdf()` above -- it does not change any pipeline logic, it
+only calls into it. Because a real run makes several slow, sequential LLM
+calls, submission is asynchronous: `POST` a job, then poll it, then
+download the PDF once it's done.
+
+Run it locally:
+
+```bash
+uvicorn landtitle.api.app:app --reload
+```
+
+Then open **http://127.0.0.1:8000/** in a browser -- FastAPI serves the
+static frontend (`frontend/index.html`, plain HTML/JS, no build step) at
+the app's own root path via a `StaticFiles` mount, so the page's `fetch()`
+calls hit `/opinions` on the same origin with no separate server or CORS
+setup needed.
+
+Endpoints:
+- `POST /opinions` -- multipart upload. Fields: `sale_deed` (one or more
+  files, repeat the field for each; chronological order, oldest first),
+  `revenue_record` (optional, single file), `ec` (optional, single file).
+  Returns `{"job_id": ..., "status": "pending"}` immediately (HTTP 202).
+- `GET /opinions/{job_id}` -- job status: `pending` / `running` / `done` /
+  `failed` (with an `error` string on failure). Metadata only (file counts,
+  booleans, timestamps) -- never document content.
+- `GET /opinions/{job_id}/download` -- the generated PDF once `status` is
+  `done` (409 before that, 410 if its retention window has already elapsed).
+
+Required env vars are the same ones the CLI pipeline already needs (see
+"Environment variables" above under "How this connects to the LLM") --
+`LLM_API_BASE_URL` at minimum, set via `.env` at the repo root. If it's
+unset, job creation still succeeds (the API doesn't require it up front),
+but every submitted job will fail fast with `QwenClient`'s `RuntimeError` as
+its recorded error -- this is expected, not a bug in the API layer.
+
+Job/file handling: each job gets its own directory under the OS temp dir
+(`tempfile.mkdtemp`, never inside this repo); uploaded PDFs are deleted the
+moment the pipeline has consumed them (success or failure), and the
+generated opinion PDF is deleted by a background reaper once
+`LANDTITLE_JOB_RETENTION_SECONDS` (env var, default 1800 = 30 min) has
+elapsed since the job finished. Jobs are tracked in an in-memory dict,
+single-process -- restarting the server loses job history (by design, for
+this first cut). Hosting/deployment/Docker is explicitly out of scope here;
+this section is local-run only.
+
 ## What has and hasn't been run in this environment
 
 72 unit tests pass (`python -m pytest tests/`), covering every pure-logic

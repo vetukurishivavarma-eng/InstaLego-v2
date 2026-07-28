@@ -33,3 +33,10 @@ fpdf2
 
 # Testing
 pytest
+httpx  # required by fastapi.testclient.TestClient (tests/test_api.py)
+
+# HTTP delivery layer (src/landtitle/api/) -- thin FastAPI wrapper + upload
+# handling around the pipeline above. Not used by the pipeline itself.
+fastapi
+uvicorn
+python-multipart

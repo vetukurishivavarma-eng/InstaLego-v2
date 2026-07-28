@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Land Title Due Diligence Engine</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    max-width: 640px;
+    margin: 2.5rem auto;
+    padding: 0 1.25rem;
+    line-height: 1.5;
+  }
+  h1 { font-size: 1.35rem; margin-bottom: 0.25rem; }
+  .subtitle { color: #888; margin-top: 0; margin-bottom: 1.75rem; font-size: 0.92rem; }
+  fieldset {
+    border: 1px solid #8884;
+    border-radius: 8px;
+    padding: 1rem 1.1rem 1.2rem;
+    margin-bottom: 1rem;
+  }
+  legend { font-weight: 600; padding: 0 0.4rem; font-size: 0.95rem; }
+  label { display: block; margin-top: 0.6rem; font-size: 0.88rem; }
+  .hint { color: #888; font-size: 0.8rem; margin: 0.15rem 0 0.35rem; }
+  input[type="file"] { display: block; margin-top: 0.3rem; width: 100%; }
+  button {
+    font-size: 0.95rem;
+    padding: 0.55rem 1.3rem;
+    border-radius: 6px;
+    border: none;
+    background: #2563eb;
+    color: white;
+    cursor: pointer;
+  }
+  button:disabled { background: #93a3c4; cursor: not-allowed; }
+  #status-box {
+    margin-top: 1.5rem;
+    padding: 1rem 1.1rem;
+    border-radius: 8px;
+    border: 1px solid #8884;
+    display: none;
+  }
+  #status-box.visible { display: block; }
+  .status-line { display: flex; align-items: center; gap: 0.5rem; font-size: 0.92rem; }
+  .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: #d97706; flex-shrink: 0; }
+  .dot.done { background: #16a34a; }
+  .dot.failed { background: #dc2626; }
+  #error-detail {
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+    color: #dc2626;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  #download-link {
+    display: inline-block;
+    margin-top: 0.8rem;
+    font-weight: 600;
+  }
+  .job-id { color: #888; font-size: 0.78rem; margin-top: 0.5rem; }
+  .draft-note {
+    margin-top: 1.75rem;
+    font-size: 0.78rem;
+    color: #888;
+  }
+</style>
+</head>
+<body>
+  <h1>Land Title Due Diligence Engine</h1>
+  <p class="subtitle">Upload documents to generate a draft title opinion. Processing runs in the background; this page polls for status.</p>
+
+  <form id="upload-form">
+    <fieldset>
+      <legend>Sale Deed(s) &mdash; required</legend>
+      <p class="hint">One or more, chronological order (oldest first).</p>
+      <input type="file" id="sale-deed-input" name="sale_deed" accept="application/pdf" multiple required>
+    </fieldset>
+
+    <fieldset>
+      <legend>Revenue Record (Pahani / Adangal) &mdash; optional</legend>
+      <input type="file" id="revenue-record-input" name="revenue_record" accept="application/pdf">
+    </fieldset>
+
+    <fieldset>
+      <legend>Encumbrance Certificate &mdash; optional</legend>
+      <input type="file" id="ec-input" name="ec" accept="application/pdf">
+    </fieldset>
+
+    <button type="submit" id="submit-btn">Generate opinion</button>
+  </form>
+
+  <div id="status-box">
+    <div class="status-line">
+      <span class="dot" id="status-dot"></span>
+      <span id="status-text">Submitting...</span>
+    </div>
+    <div class="job-id" id="job-id-line"></div>
+    <div id="error-detail"></div>
+    <a id="download-link" href="#" style="display:none;">Download opinion PDF</a>
+  </div>
+
+  <p class="draft-note">
+    Output is always a DRAFT opinion pending human review by a licensed practitioner &mdash;
+    this tool does not and cannot finalize an opinion on its own.
+  </p>
+
+<script>
+const form = document.getElementById('upload-form');
+const submitBtn = document.getElementById('submit-btn');
+const statusBox = document.getElementById('status-box');
+const statusDot = document.getElementById('status-dot');
+const statusText = document.getElementById('status-text');
+const jobIdLine = document.getElementById('job-id-line');
+const errorDetail = document.getElementById('error-detail');
+const downloadLink = document.getElementById('download-link');
+
+const POLL_INTERVAL_MS = 3000;
+let pollTimer = null;
+
+function resetStatusUI() {
+  statusBox.classList.add('visible');
+  statusDot.className = 'dot';
+  errorDetail.textContent = '';
+  downloadLink.style.display = 'none';
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+}
+
+async function pollStatus(jobId) {
+  let res;
+  try {
+    res = await fetch(`/opinions/${jobId}`);
+  } catch (err) {
+    statusText.textContent = 'Network error while checking status. Retrying...';
+    pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+    return;
+  }
+
+  if (!res.ok) {
+    statusText.textContent = `Could not fetch job status (HTTP ${res.status}).`;
+    statusDot.classList.add('failed');
+    submitBtn.disabled = false;
+    return;
+  }
+
+  const data = await res.json();
+
+  if (data.status === 'pending' || data.status === 'running') {
+    statusText.textContent = data.status === 'pending'
+      ? 'Queued...'
+      : 'Processing (this can take several minutes)...';
+    pollTimer = setTimeout(() => pollStatus(jobId), POLL_INTERVAL_MS);
+    return;
+  }
+
+  submitBtn.disabled = false;
+
+  if (data.status === 'done') {
+    statusDot.classList.add('done');
+    statusText.textContent = 'Done.';
+    downloadLink.href = `/opinions/${jobId}/download`;
+    downloadLink.style.display = 'inline-block';
+    return;
+  }
+
+  if (data.status === 'failed') {
+    statusDot.classList.add('failed');
+    statusText.textContent = 'Failed.';
+    errorDetail.textContent = data.error || '(no further detail)';
+    return;
+  }
+
+  statusText.textContent = `Unknown status: ${data.status}`;
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  stopPolling();
+  resetStatusUI();
+  submitBtn.disabled = true;
+  statusText.textContent = 'Uploading...';
+  jobIdLine.textContent = '';
+
+  const formData = new FormData(form);
+
+  let res;
+  try {
+    res = await fetch('/opinions', { method: 'POST', body: formData });
+  } catch (err) {
+    statusText.textContent = 'Upload failed (network error).';
+    statusDot.classList.add('failed');
+    submitBtn.disabled = false;
+    return;
+  }
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const body = await res.json();
+      detail = body.detail || detail;
+    } catch (_) { /* ignore parse error */ }
+    statusText.textContent = 'Upload rejected.';
+    errorDetail.textContent = detail;
+    statusDot.classList.add('failed');
+    submitBtn.disabled = false;
+    return;
+  }
+
+  const data = await res.json();
+  jobIdLine.textContent = `Job id: ${data.job_id}`;
+  statusText.textContent = 'Queued...';
+  pollStatus(data.job_id);
+});
+</script>
+</body>
+</html>

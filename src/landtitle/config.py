@@ -28,7 +28,30 @@ MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 LLM_API_BASE_URL = os.environ.get("LLM_API_BASE_URL")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")  # optional; only sent as a Bearer token if set
 LLM_API_TIMEOUT = float(os.environ.get("LLM_API_TIMEOUT", "240"))
-LLM_TEMPERATURE = 0.1  # low temp reduces confident fabrication (extraction + opinion gen)
+# Stays at 0.1 -- DO NOT set to 0.0. Confirmed live (2026-07-29): the same
+# document extracted twice can produce different results (e.g. a
+# prior-title-reference document number captured one run, seemingly dropped
+# the next), which undermines any check that depends on that field being
+# reliably extracted -- 0.0 (greedy decoding) was tried specifically to fix
+# this and was confirmed, via direct curl probes with an otherwise-identical
+# payload, to make the user's real Kaggle/Qwen FastAPI server return a hard
+# HTTP 500 on every request (temperature=0.1 succeeds immediately with the
+# same payload) -- their generation code almost certainly doesn't handle
+# true-zero-temperature/greedy sampling gracefully. 0.1 is the lowest value
+# confirmed safe against their actual server; do not lower this again
+# without re-probing live first. The `seed` field (below) was kept as a
+# lower-risk, confirmed-harmless partial mitigation for the same
+# determinism goal.
+LLM_TEMPERATURE = 0.1
+# Sent as a "seed" field on every LLM request (config.py, llm/client.py) --
+# confirmed live that the user's server tolerates an unrecognized field
+# without error, so this is safe to send unconditionally. Whether it actually
+# increases determinism depends entirely on whether that server's own
+# generation code reads and applies it (out of this project's control) --
+# included as a no-cost attempt at determinism, mirroring the same
+# temperature=0+fixed-seed pattern already used for this exact problem in the
+# sibling InstaLego project's Groq calls.
+LLM_SEED = int(os.environ.get("LLM_SEED", "42"))
 LLM_MAX_NEW_TOKENS = 2048
 
 # --- Embeddings / vector store (validated) ---

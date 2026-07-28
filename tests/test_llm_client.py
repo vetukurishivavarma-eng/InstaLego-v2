@@ -23,7 +23,9 @@ def test_missing_base_url_raises_clearly():
 @patch("landtitle.llm.client.requests.post")
 def test_generate_sends_expected_request_shape(mock_post):
     mock_post.return_value = _mock_response("hello back")
-    client = QwenClient(base_url="https://outflank-filler-bullwhip.ngrok-free.dev", api_key=None, timeout=120.0)
+    client = QwenClient(
+        base_url="https://outflank-filler-bullwhip.ngrok-free.dev", api_key=None, timeout=120.0, seed=7
+    )
 
     result = client.generate("system prompt", "user prompt", temperature=0.1, max_new_tokens=2048)
 
@@ -37,9 +39,19 @@ def test_generate_sends_expected_request_shape(mock_post):
         "messages": [{"role": "user", "content": "system prompt\n\nuser prompt"}],
         "temperature": 0.1,
         "max_tokens": 2048,
+        "seed": 7,
     }
-    # Explicit constructor arg, decoupled from config.LLM_API_TIMEOUT's default.
+    # Explicit constructor args, decoupled from config.py's defaults.
     assert kwargs["timeout"] == 120.0
+
+
+@patch("landtitle.llm.client.requests.post")
+def test_generate_omits_seed_when_none(mock_post):
+    mock_post.return_value = _mock_response("ok")
+    client = QwenClient(base_url="https://example.test", seed=None)
+    client.generate("sys", "user")
+    _, kwargs = mock_post.call_args
+    assert "seed" not in kwargs["json"]
 
 
 @patch("landtitle.llm.client.requests.post")

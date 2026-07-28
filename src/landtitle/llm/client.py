@@ -27,6 +27,7 @@ from landtitle.config import (
     LLM_API_KEY,
     LLM_API_TIMEOUT,
     LLM_MAX_NEW_TOKENS,
+    LLM_SEED,
     LLM_TEMPERATURE,
     LLM_TRANSIENT_RETRY_ATTEMPTS,
     LLM_TRANSIENT_RETRY_BACKOFF_SECONDS,
@@ -47,6 +48,7 @@ class QwenClient:
         base_url: str | None = LLM_API_BASE_URL,
         api_key: str | None = LLM_API_KEY,
         timeout: float = LLM_API_TIMEOUT,
+        seed: int | None = LLM_SEED,
     ):
         if not base_url:
             raise RuntimeError(
@@ -58,6 +60,7 @@ class QwenClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
+        self.seed = seed
 
     def generate(
         self,
@@ -73,6 +76,12 @@ class QwenClient:
             "temperature": temperature,
             "max_tokens": max_new_tokens,
         }
+        if self.seed is not None:
+            # Confirmed live: the server tolerates an unrecognized field
+            # without error. Whether it actually increases determinism
+            # depends on the server's own generation code applying it -- see
+            # config.py's LLM_SEED docstring.
+            payload["seed"] = self.seed
         headers = {
             "Content-Type": "application/json",
             # ngrok's free tier serves an HTML "visit site" interstitial to

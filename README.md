@@ -178,6 +178,39 @@ The CLI (`main()`) validates that all provided file paths exist before
 starting the (slow, LLM-driven) pipeline, and missing Tesseract/Poppler
 binaries now raise a clear `RuntimeError` pointing back to this README's
 Setup section, instead of surfacing pytesseract's/pdf2image's raw exception.
+`QwenClient.generate()` also retries a plain timeout the same way (not just
+5xx) — confirmed live that a real call once timed out at exactly the
+(previous, 120s) limit, likely from a second concurrent request queued
+behind it on the user's single Kaggle server; `LLM_API_TIMEOUT` defaults to
+240s now.
+
+## Determinism
+
+`LLM_TEMPERATURE` stays at **0.1 — do not lower it to 0.0.** Confirmed live
+(2026-07-29) that the same document extracted twice can produce different
+results (a prior-title-reference document number captured one run,
+seemingly dropped the next) — undermining any check whose correctness
+depends on that field being reliably extracted. Setting temperature to 0.0
+(greedy decoding, the standard fix for exactly this) was tried and directly
+confirmed, via curl probes with an otherwise-identical payload, to make the
+user's real Kaggle/Qwen FastAPI server return a hard HTTP 500 on every
+single request — their generation code almost certainly doesn't handle
+true-zero-temperature sampling gracefully. 0.1 is the lowest value confirmed
+safe against their actual server. **Do not lower this again without
+re-probing the live server first with a raw curl call**, exactly like the
+probe that caught this — a passing test suite would not have caught it,
+since nothing here talks to a real server.
+
+A `seed` field (`LLM_SEED`, default `42`) is now sent on every request as a
+lower-risk partial mitigation for the same goal — confirmed live that the
+server tolerates an unrecognized field without error, but whether it
+*actually* increases determinism depends entirely on whether the server's
+own generation code reads and applies it, which is outside this project's
+control. Treat determinism as reduced, not solved: any check depending on
+a single extraction call being accurate (e.g. `unevidenced_prior_reference_
+check`) can still occasionally miss a real issue that a repeat run would
+catch — this is a known, open risk, not a bug with a clean fix available
+right now.
 
 ## Key confirmed findings baked into this code (see inline docstrings)
 
@@ -203,6 +236,28 @@ Setup section, instead of surfacing pytesseract's/pdf2image's raw exception.
   `unevidenced_prior_reference_check()` now flags (low severity) any such
   reference that isn't matched by another submitted Sale Deed's
   `document_number` or an Encumbrance Certificate entry.
+- **Partially mitigated, NOT fully solved: the opinion model invents
+  transferor/transferee names for prior transactions it was never given
+  party data for.** `prior_title_deed_references` is a bare document
+  number/date self-reported by the current deed's own recital — no
+  separate party extraction exists for whatever transaction it refers to.
+  Confirmed live, twice, with two different fabricated names: the model
+  still wrote a specific "X transferred to Y" sentence for such a
+  reference — once reusing a relation-clause name (a seller's own father)
+  for a transaction the source actually described as a family *partition*,
+  not a purchase from a named vendor; once inventing an unrelated name
+  entirely to paper over a genuine chain-of-title gap and make a broken
+  chain read as continuous. `opinion/generator.py`'s
+  `_ensure_prior_reference_parties_not_claimed()` unconditionally appends a
+  disclaimer whenever `prior_title_deed_references` is non-empty, and the
+  `SYSTEM_PROMPT` now has an explicit rule against this — but neither
+  *removes* the model's own fabricated sentence from the narrative (parsing
+  and stripping a specific false claim from arbitrary free text reliably is
+  far more fragile than this project's established append-only pattern).
+  The final opinion can still contain the model's misleading prose
+  alongside the deterministic correction; a reviewer has everything needed
+  to catch the problem, but the narrative itself isn't cleaned up. Treat
+  this as an open, harder problem for future work, not resolved.
 - **Footnote/amendment lines must be filtered before section-splitting** the
   source Acts, or they get misidentified as section boundaries and corrupt
   the corpus (`legal/corpus_builder.is_footnote_line`).

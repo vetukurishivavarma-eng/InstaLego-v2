@@ -199,15 +199,20 @@ verification, legal retrieval, and opinion generation have each been
 exercised and had real bugs found and fixed this way (see inline docstrings
 in `pipeline.py` and `opinion/generator.py` for the specific failure modes).
 
+`scripts/trap_test.py` runs Layer 3 (`verification/checks.py`) against the
+real cached extraction from that same real document set, deliberately
+injecting one known inconsistency at a time (extent mismatch, a boundary
+mismatch, an unreleased mortgage, a litigation entry, a genuine chain-of-title
+gap) and confirming each is caught — plus confirming untouched real fields
+and a released mortgage correctly stay quiet. 9/9 checks behaved as expected.
+
 **Still not run** — these remain open before calling this production-ready:
 - **A full end-to-end run with 2+ real, chronologically-ordered Sale Deeds**,
-  to exercise `owner_chain_continuity_check()` beyond its unit tests. Only
-  one real historical deed has been sourced so far.
+  to exercise `owner_chain_continuity_check()` through the actual pipeline
+  (OCR + extraction), not just its unit tests and `trap_test.py`'s synthetic
+  second deed. Only one real historical deed has been sourced so far.
 - The scanned-EC OpenCV grid-detection path (real EC testing so far has only
   covered plain-text/hand-typed tables).
-- A deliberately-broken test case to confirm the verification layer actually
-  catches a real inconsistency (only clean, consistent documents tested so
-  far).
 - Wider extraction testing across different registrars, eras, and scan
   qualities.
 - GPU load-testing on whatever hardware actually serves the model — a

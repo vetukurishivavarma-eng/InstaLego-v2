@@ -42,10 +42,17 @@ class SaleDeed(BaseModel):
     sellers: list[Party] = Field(default_factory=list)
     buyers: list[Party] = Field(default_factory=list)
     land_extent: Optional[str] = Field(
-        default=None, description="Land extent only, e.g. '266 sq. yards'. Never combined with built-up area."
+        default=None,
+        description="Land extent only, as a numeric quantity with its unit (square yards, square "
+        "feet, acres, cents, etc.) copied exactly as written in the source text. Never combined "
+        "with built-up area. Never a placeholder or illustrative figure -- if no land extent is "
+        "stated, leave this null.",
     )
     built_up_area: Optional[str] = Field(
-        default=None, description="Built-up/constructed area only, e.g. '1800 sq. ft'. Never combined with land extent."
+        default=None,
+        description="Built-up/constructed area only, as a numeric quantity with its unit copied "
+        "exactly as written in the source text. Never combined with land extent. Never a "
+        "placeholder or illustrative figure -- if no built-up area is stated, leave this null.",
     )
     boundaries: Boundaries = Field(default_factory=Boundaries)
     sale_consideration: Optional[str] = None
@@ -57,8 +64,10 @@ class SaleDeed(BaseModel):
     property_description: Optional[str] = None
     survey_number: Optional[str] = Field(
         default=None,
-        description="Municipal/plot numbering as it appears on the deed (e.g. 'Plot No.4, Municipal No.6-3-862/3'). "
-        "This is NOT the revenue survey number used in Pahani records — do not conflate the two systems.",
+        description="Municipal/plot numbering as it appears on the deed (typically a plot number "
+        "and/or municipal door or premises number), copied exactly as written in the source text. "
+        "This is NOT the revenue survey number used in Pahani records — do not conflate the two "
+        "systems. Never a placeholder or illustrative value -- if not stated, leave this null.",
     )
 
 
@@ -100,8 +109,10 @@ class RevenueRecord(BaseModel):
     revenue_year: Optional[str] = None
     survey_number: Optional[str] = Field(
         default=None,
-        description="Revenue survey numbering as it appears in the Pahani (e.g. '82/A/4'). "
-        "This is NOT the municipal/plot numbering used in Sale Deeds.",
+        description="Revenue survey numbering as it appears in the Pahani (a slash-separated "
+        "survey/sub-division number), copied exactly as written in the source text. This is NOT "
+        "the municipal/plot numbering used in Sale Deeds. Never a placeholder or illustrative "
+        "value -- if not stated, leave this null.",
     )
     pattadar_name: Optional[str] = None
     pattadar_relation: Optional[str] = None

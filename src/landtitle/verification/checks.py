@@ -240,3 +240,96 @@ def owner_chain_continuity_check(sale_deeds: list[SaleDeed]) -> list[Flag]:
                     documents_compared=[current_label, next_label],
                 ))
     return flags
+
+
+# --- Prior-title-reference evidencing ----------------------------------------
+
+_DOC_NUMBER_RE = re.compile(r"\d+/\d+")
+
+
+def _document_number_candidates(reference: str) -> list[str]:
+    """A `prior_title_deed_references` entry is often a full descriptive
+    sentence copied from a deed's recital (e.g. "Document No. 1123/1998,
+    dated 02-06-1998, registered at the office of the Sub-Registrar..."),
+    not a bare document number. Pull out the number/year-shaped substring
+    (the standard sub-registrar document-number format) for matching; if
+    none is found, fall back to the whole trimmed string so an
+    unconventionally-formatted reference can still match via containment."""
+    matches = _DOC_NUMBER_RE.findall(reference)
+    return matches if matches else [reference.strip()]
+
+
+def _reference_is_evidenced(reference: str, known_document_numbers: list[str]) -> bool:
+    candidates = _document_number_candidates(reference)
+    for known in known_document_numbers:
+        if not known:
+            continue
+        known_norm = known.strip()
+        for candidate in candidates:
+            if not candidate:
+                continue
+            if candidate == known_norm or candidate in known_norm or known_norm in candidate:
+                return True
+        # Last-resort fuzzy compare on the full strings, for the case where
+        # neither side yields a clean number-shaped substring to compare.
+        if fuzz.token_sort_ratio(reference.lower(), known_norm.lower()) >= NAME_SIMILARITY_THRESHOLD:
+            return True
+    return False
+
+
+def unevidenced_prior_reference_check(
+    sale_deeds: list[SaleDeed], ec: EncumbranceCertificate | None
+) -> list[Flag]:
+    """A Sale Deed's own recital often narrates how its seller acquired
+    title by naming an earlier document (`prior_title_deed_references`),
+    e.g. "Document No. 1123/1998, dated 02-06-1998" describing how the
+    1998 vendor themselves came to own the property. That recital, on its
+    own, proves nothing — it is the current deed's self-report of a prior
+    transaction, not independent evidence that the transaction happened as
+    described or that title actually passed cleanly through it.
+
+    This check flags a prior-title reference only when NOTHING actually
+    submitted for this diligence corroborates it: neither another submitted
+    Sale Deed's own `document_number`, nor an entry in the submitted
+    Encumbrance Certificate. That is a real, common chain-of-title gap in
+    Indian land-title practice (the referenced document was simply never
+    part of this diligence bundle) — but it is deliberately flagged as
+    "not independently evidenced," not as a confirmed defect: severity is
+    kept low, since the honest read of this signal is "pull the referenced
+    document and confirm," not "title is bad." A deed with no stated prior
+    reference (empty list) is not flagged at all — that is either root/
+    original title or simply a field the extraction didn't capture, not a
+    chain gap.
+    """
+    flags: list[Flag] = []
+    if not sale_deeds:
+        return flags
+
+    known_document_numbers = [d.document_number for d in sale_deeds if d.document_number]
+    if ec is not None:
+        known_document_numbers += [e.document_number for e in ec.entries if e.document_number]
+
+    for deed in sale_deeds:
+        deed_label = f"Sale Deed {deed.document_number or '(document number not captured)'}"
+        for reference in deed.prior_title_deed_references:
+            if not reference or not reference.strip():
+                continue
+            if _reference_is_evidenced(reference, known_document_numbers):
+                continue
+            documents_compared = [deed_label]
+            if ec is not None:
+                documents_compared.append("Encumbrance Certificate")
+            flags.append(Flag(
+                issue="Prior title reference not independently evidenced",
+                severity="low",
+                detail=(
+                    f"{deed_label} recites a prior title reference ('{reference.strip()}') that does "
+                    f"not match the document_number of any other submitted Sale Deed or Encumbrance "
+                    f"Certificate entry. This does not mean the referenced transaction is invalid -- "
+                    f"only that it is not corroborated by the documents actually submitted for this "
+                    f"diligence; the underlying document should be obtained and reviewed to close the "
+                    f"chain of title."
+                ),
+                documents_compared=documents_compared,
+            ))
+    return flags

@@ -6,6 +6,7 @@ from landtitle.verification.checks import (
     name_similarity_check,
     owner_chain_continuity_check,
     survey_number_match,
+    unevidenced_prior_reference_check,
 )
 
 
@@ -197,4 +198,71 @@ def test_owner_chain_different_buyers_same_date_not_flagged_as_conflict():
         buyers=[Party(name="New Owner")],
     )
     flags = owner_chain_continuity_check([deed1, deed2])
+    assert flags == []
+
+
+# --- unevidenced_prior_reference_check -------------------------------------------
+
+
+def test_unevidenced_prior_reference_flags_low():
+    # Real gap this closes: a deed's own recital narrates its seller's prior
+    # acquisition via an earlier document, but nothing submitted alongside it
+    # (no other deed, no EC entry) actually evidences that earlier document.
+    deed = make_sale_deed(
+        document_number="D2",
+        prior_title_deed_references=["Document No. 1123/1998, dated 02-06-1998"],
+    )
+    flags = unevidenced_prior_reference_check([deed], ec=None)
+    assert len(flags) == 1
+    assert flags[0].severity == "low"
+    assert "not independently evidenced" in flags[0].issue
+
+
+def test_unevidenced_prior_reference_evidenced_by_ec_entry_no_flag():
+    # Regression case: an earlier real test document's EC entries included
+    # 2609/2000 and 2610/2000 as real prior Sale Deed transactions -- a
+    # deed's prior reference pointing at either, with both present in the
+    # submitted EC, must not flag.
+    deed = make_sale_deed(
+        document_number="D3",
+        prior_title_deed_references=["Document No. 2609/2000, dated 01-01-2000"],
+    )
+    ec = EncumbranceCertificate(entries=[
+        ECEntry(document_number="2609/2000", date="01-01-2000", nature_of_document="Sale Deed"),
+        ECEntry(document_number="2610/2000", date="01-01-2000", nature_of_document="Sale Deed"),
+    ])
+    flags = unevidenced_prior_reference_check([deed], ec=ec)
+    assert flags == []
+
+
+def test_unevidenced_prior_reference_evidenced_by_another_sale_deed_no_flag():
+    deed1 = make_sale_deed(document_number="1123/1998")
+    deed2 = make_sale_deed(
+        document_number="D2",
+        prior_title_deed_references=["Document No. 1123/1998, dated 02-06-1998"],
+    )
+    flags = unevidenced_prior_reference_check([deed1, deed2], ec=None)
+    assert flags == []
+
+
+def test_unevidenced_prior_reference_empty_list_no_flag():
+    deed = make_sale_deed(document_number="D1", prior_title_deed_references=[])
+    flags = unevidenced_prior_reference_check([deed], ec=None)
+    assert flags == []
+
+
+def test_unevidenced_prior_reference_matches_number_embedded_in_sentence():
+    # The reference is a full descriptive sentence, not a bare document
+    # number -- matching must still work via the extracted number substring.
+    deed = make_sale_deed(
+        document_number="D2",
+        prior_title_deed_references=[
+            "Vide Document No. 1123/1998, dated 02-06-1998, registered at the "
+            "office of the Sub-Registrar, the said vendor acquired the schedule property."
+        ],
+    )
+    ec = EncumbranceCertificate(entries=[
+        ECEntry(document_number="1123/1998", date="02-06-1998", nature_of_document="Sale Deed"),
+    ])
+    flags = unevidenced_prior_reference_check([deed], ec=ec)
     assert flags == []

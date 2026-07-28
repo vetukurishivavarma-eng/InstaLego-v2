@@ -39,6 +39,7 @@ from landtitle.verification.checks import (
     name_similarity_check,
     owner_chain_continuity_check,
     survey_number_match,
+    unevidenced_prior_reference_check,
 )
 
 logger = logging.getLogger(__name__)
@@ -227,6 +228,9 @@ def run_verification(
 
     if ec is not None:
         flags += active_encumbrance_check(ec)
+
+    if sale_deeds:
+        flags += unevidenced_prior_reference_check(sale_deeds, ec)
 
     logger.info("Verification: %d flag(s) found", len(flags))
     return flags

@@ -1,4 +1,4 @@
-from landtitle.pipeline import _is_placeholder_party_name, _merge_extractions, _merge_parties
+from landtitle.pipeline import _is_placeholder_party_name, _merge_extractions, _merge_parties, run_verification
 from landtitle.schemas import Party, SaleDeed
 
 # Fictional names below reproduce the exact structural pattern found in a
@@ -98,3 +98,17 @@ def test_merge_extractions_uses_fuzzy_dedup_for_sale_deed_sellers():
     assert len(merged.buyers) == 1
     assert merged.document_number == "400/2012"
     assert merged.land_extent == "329.61 square yards"
+
+
+def test_run_verification_calls_unevidenced_prior_reference_check():
+    # Integration-level check that run_verification() actually wires in
+    # unevidenced_prior_reference_check(), not just that the unit function
+    # behaves correctly in isolation -- a Sale Deed whose recital names a
+    # prior document that nothing else submitted evidences must surface a
+    # flag out of the full run_verification() call.
+    deed = SaleDeed(
+        document_number="D2",
+        prior_title_deed_references=["Document No. 1123/1998, dated 02-06-1998"],
+    )
+    flags = run_verification([deed], revenue_record=None, ec=None)
+    assert any("not independently evidenced" in f.issue for f in flags)

@@ -196,6 +196,13 @@ Setup section, instead of surfacing pytesseract's/pdf2image's raw exception.
   positives. `verification/checks.py` implements narrow, deterministic
   checks instead, and the opinion-generation prompt is instructed to report
   *only* flags this layer actually found.
+- **Resolved gap: a Sale Deed's own recital can narrate a prior acquisition
+  (`prior_title_deed_references`) that nothing submitted actually backs
+  up** — e.g. "Document No. 1123/1998" named in the recital but never
+  itself supplied as a Sale Deed or EC entry. `verification/checks.py`'s
+  `unevidenced_prior_reference_check()` now flags (low severity) any such
+  reference that isn't matched by another submitted Sale Deed's
+  `document_number` or an Encumbrance Certificate entry.
 - **Footnote/amendment lines must be filtered before section-splitting** the
   source Acts, or they get misidentified as section boundaries and corrupt
   the corpus (`legal/corpus_builder.is_footnote_line`).

@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from landtitle.opinion.generator import (
     _ensure_all_flags_present,
     _ensure_all_transactions_present,
+    _ensure_prior_reference_parties_not_claimed,
     _ensure_verified_party_identities_present,
     generate_opinion,
 )
@@ -176,6 +177,72 @@ def test_generate_opinion_guarantees_correct_party_identities_even_if_model_swap
 
     assert "Sri. V. Nagendra Rao" in opinion.chain_of_ownership
     assert "Smt. G. Padma" in opinion.chain_of_ownership
+
+
+_PRIOR_REFERENCE_ONLY_FACTS = {
+    "sale_deeds": [
+        {
+            "document_number": "890/2005",
+            "sellers": [{"name": "Sri. M. Ravindra Babu", "relation": "S/o Sri. M. Seetharamaiah"}],
+            "buyers": [{"name": "Sri. D. Prasad Rao", "relation": "S/o Sri. D. Nageswara Rao"}],
+            "prior_title_deed_references": ["Document No. 77/1990, dated 05-03-1990"],
+        }
+    ]
+}
+
+
+def test_ensure_prior_reference_parties_not_claimed_appends_disclaimer():
+    # Confirmed live, twice: given a prior reference that is a bare document
+    # number/date with no party data, the model still invented a transferor
+    # for it -- once by reusing a relation-clause name (the seller's own
+    # father) for a transaction the source actually describes as a family
+    # partition, once by inventing an unrelated name entirely to paper over
+    # a real chain gap. This must always append regardless of what specific
+    # narrative text preceded it.
+    narrative = (
+        "Sri. M. Seetharamaiah transferred the property to Sri. M. Ravindra Babu "
+        "via Document No. 77/1990."
+    )
+    result = _ensure_prior_reference_parties_not_claimed(narrative, _PRIOR_REFERENCE_ONLY_FACTS)
+    assert "77/1990" in result
+    assert "were not independently extracted or verified" in result.lower()
+
+
+def test_ensure_prior_reference_parties_not_claimed_noop_with_no_references():
+    facts = {"sale_deeds": [{"document_number": "890/2005", "sellers": [], "buyers": [],
+                              "prior_title_deed_references": []}]}
+    narrative = "A clean narrative with nothing to caveat."
+    assert _ensure_prior_reference_parties_not_claimed(narrative, facts) == narrative
+
+
+def test_ensure_prior_reference_parties_not_claimed_idempotent():
+    once = _ensure_prior_reference_parties_not_claimed("Some narrative.", _PRIOR_REFERENCE_ONLY_FACTS)
+    twice = _ensure_prior_reference_parties_not_claimed(once, _PRIOR_REFERENCE_ONLY_FACTS)
+    assert once == twice  # must not append a second disclaimer
+
+
+def test_generate_opinion_appends_prior_reference_disclaimer_even_if_model_fabricates_transferor():
+    """End-to-end through generate_opinion() reproducing the exact real
+    failure: the model invented a transferor (a relation-clause name) for a
+    prior reference it was never given party data for, for a transaction
+    the source describes as a family partition, not a purchase."""
+    client = MagicMock()
+    client.extract_structured.return_value = MagicMock(
+        property_summary="",
+        chain_of_ownership=(
+            "Sri. M. Seetharamaiah transferred the property to Sri. M. Ravindra Babu "
+            "via Document No. 77/1990."
+        ),
+        encumbrance_status="",
+        legal_compliance_check="",
+        risk_flags_narrative="No inconsistencies found.",
+        overall_recommendation="Clear Title",
+    )
+
+    opinion = generate_opinion(facts=_PRIOR_REFERENCE_ONLY_FACTS, flags=[], citations=[], client=client)
+
+    assert "were not independently extracted or verified" in opinion.chain_of_ownership.lower()
+    assert "77/1990" in opinion.chain_of_ownership
 
 
 def test_generate_opinion_guarantees_flag_even_if_model_omits_it():

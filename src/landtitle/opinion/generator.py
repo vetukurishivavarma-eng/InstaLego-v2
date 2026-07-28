@@ -51,6 +51,12 @@ section number even if you recall one from general knowledge or training.
 who or what you are.
 6. This draft requires human review before it can be relied upon. Do not state or imply that this \
 opinion is final or ready for reliance.
+7. You were NOT given the parties (transferor/transferee) of any transaction referenced only via \
+"prior_title_deed_references" — that field is a bare document number and date self-reported by the \
+CURRENT deed's own recital, not a separate party extraction. NEVER name, imply, or invent who \
+transferred that prior property to whom, and NEVER reuse a relation clause (e.g. "S/o [Name]") \
+belonging to a CURRENT party as if that person were the transferor in a prior transaction. State \
+only that the prior document exists (its number and date) — do not narrate a transfer for it.
 """
 
 
@@ -176,6 +182,67 @@ def _ensure_verified_party_identities_present(narrative: str, facts: dict) -> st
     return f"{narrative}\n\n{correction}"
 
 
+def _ensure_prior_reference_parties_not_claimed(narrative: str, facts: dict) -> str:
+    """Guarantee an explicit disclaimer is present whenever a Sale Deed has
+    non-empty `prior_title_deed_references`, regardless of what the model's
+    own narrative claims about those references.
+
+    Confirmed live, twice, with two different fabricated names: given a
+    deed's recital correctly extracted as pure self-report
+    ({"prior_title_deed_references": ["Document No. 331/1988, dated
+    12-01-1988"]} — a bare document number/date, no party names) and the
+    deed's own seller correctly extracted as {"name": "Sri. T. Chandra
+    Sekhar Rao", "relation": "S/o Sri. T. Appala Naidu"} — both fields
+    clean, no fabrication at extraction — the opinion-generation model
+    still wrote "Sri. T. Appala Naidu transferred the property to Sri. T.
+    Chandra Sekhar Rao via Document No. 331/1988," inventing a transferor
+    (the seller's own father, a relation-clause name, never a party to
+    anything) for a transaction the source actually describes as a family
+    partition, not a purchase from a named vendor. A second real case
+    fabricated a different invented name entirely, to paper over a genuine
+    chain-of-title gap and make the narrative read as falsely continuous.
+
+    Unlike _ensure_verified_party_identities_present (which guarantees
+    correct names ARE present), this failure is the opposite: the model
+    invents facts about a transaction it was never given party data for.
+    Reliably detecting and stripping just the fabricated sentence would
+    require parsing arbitrary free-text narrative structure ("X transferred
+    to Y", "the property passed from X to Y", ...) — far more fragile than
+    this project's established append-only pattern. Instead, this
+    unconditionally appends a disclaimer whenever prior_title_deed_references
+    is non-empty, regardless of whether fabrication is detected in this
+    specific narrative: it is always true that this deed's own extraction
+    does not independently capture who the parties were to a merely-
+    referenced prior transaction, so the disclaimer is never wrong to add,
+    and it directly neutralizes reliance on any invented name the model may
+    have written, without needing to find and edit it."""
+    references_by_deed: list[tuple[str, list[str]]] = []
+    for deed in facts.get("sale_deeds") or []:
+        refs = [r for r in (deed.get("prior_title_deed_references") or []) if r and r.strip()]
+        if refs:
+            label = f"Sale Deed {deed.get('document_number') or '(document number not stated)'}"
+            references_by_deed.append((label, refs))
+
+    if not references_by_deed:
+        return narrative
+
+    disclaimer_marker = "were not independently extracted or verified"
+    if disclaimer_marker in narrative.lower():
+        return narrative
+
+    lines = "\n".join(
+        f"- {label}: {ref.strip()}" for label, refs in references_by_deed for ref in refs
+    )
+    disclaimer = (
+        "Note on prior title references: the parties to the referenced prior transaction(s) "
+        "below were not independently extracted or verified as part of this diligence -- only "
+        "the document number and date were self-reported by the current deed's own recital. "
+        "Any name mentioned above in connection with these prior transactions should not be "
+        "relied upon as confirming who transferred the property in that transaction:\n" + lines
+    )
+    return f"{narrative}\n\n{disclaimer}"
+
+
 def generate_opinion(
     facts: dict,
     flags: list[Flag],
@@ -209,8 +276,11 @@ Legal Compliance Check, a Risk Flags narrative (restating only the VERIFIED FLAG
 
     return LegalOpinion(
         property_summary=draft.property_summary,
-        chain_of_ownership=_ensure_verified_party_identities_present(
-            _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+        chain_of_ownership=_ensure_prior_reference_parties_not_claimed(
+            _ensure_verified_party_identities_present(
+                _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+            ),
+            facts,
         ),
         encumbrance_status=draft.encumbrance_status,
         legal_compliance_check=draft.legal_compliance_check,

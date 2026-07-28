@@ -3,9 +3,23 @@ from unittest.mock import MagicMock
 from landtitle.opinion.generator import (
     _ensure_all_flags_present,
     _ensure_all_transactions_present,
+    _ensure_verified_party_identities_present,
     generate_opinion,
 )
 from landtitle.schemas import Flag
+
+# Fictional Sale Deed facts reproducing the real structural pattern (a party
+# named alongside a relation clause naming a different, non-transacting
+# relative) without any real person's name.
+_SALE_DEED_FACTS = {
+    "sale_deeds": [
+        {
+            "document_number": None,
+            "sellers": [{"name": "Sri. V. Nagendra Rao", "relation": "S/o Sri. V. Krishna Rao"}],
+            "buyers": [{"name": "Smt. G. Padma", "relation": "W/o Sri. G. Ramesh"}],
+        }
+    ]
+}
 
 # Fictional EC data reproducing the real structural pattern (a builder's sale
 # split across 2 documents, then a later resale) without any real person's
@@ -114,6 +128,54 @@ def test_ensure_all_transactions_present_ignores_non_sale_deed_entries():
 
 def test_ensure_all_transactions_present_noop_with_no_ec_data():
     assert _ensure_all_transactions_present("Some narrative.", {}) == "Some narrative."
+
+
+def test_ensure_verified_party_identities_present_appends_missing_parties():
+    # Confirmed live: given a seller/buyer extracted exactly right (name and
+    # relation clause correctly separated), the model still wrote the
+    # relation-clause names (a father, a husband) into the narrative as if
+    # they were the transacting parties.
+    narrative = _ensure_verified_party_identities_present(
+        "The chain of ownership begins with Sri. V. Krishna Rao, who sold the property "
+        "to Sri. G. Ramesh through Smt. G. Padma.",
+        _SALE_DEED_FACTS,
+    )
+    assert "Sri. V. Nagendra Rao" in narrative
+    assert "Smt. G. Padma" in narrative
+
+
+def test_ensure_verified_party_identities_present_noop_when_already_correct():
+    correct = "Sri. V. Nagendra Rao sold the property to Smt. G. Padma."
+    assert _ensure_verified_party_identities_present(correct, _SALE_DEED_FACTS) == correct
+
+
+def test_ensure_verified_party_identities_present_noop_with_no_sale_deed_data():
+    assert _ensure_verified_party_identities_present("Some narrative.", {}) == "Some narrative."
+
+
+def test_generate_opinion_guarantees_correct_party_identities_even_if_model_swaps_them():
+    """End-to-end through generate_opinion() reproducing the exact real
+    failure: the model's own chain-of-ownership narrative substituted the
+    relation-clause names (a father, a husband) for the actual seller/buyer,
+    despite both being extracted correctly and despite an explicit prompt
+    rule against exactly this confusion."""
+    client = MagicMock()
+    client.extract_structured.return_value = MagicMock(
+        property_summary="",
+        chain_of_ownership=(
+            "The chain of ownership begins with Sri. V. Krishna Rao, who sold the property "
+            "to Sri. G. Ramesh through Smt. G. Padma."
+        ),
+        encumbrance_status="",
+        legal_compliance_check="",
+        risk_flags_narrative="No inconsistencies found.",
+        overall_recommendation="Clear Title",
+    )
+
+    opinion = generate_opinion(facts=_SALE_DEED_FACTS, flags=[], citations=[], client=client)
+
+    assert "Sri. V. Nagendra Rao" in opinion.chain_of_ownership
+    assert "Smt. G. Padma" in opinion.chain_of_ownership
 
 
 def test_generate_opinion_guarantees_flag_even_if_model_omits_it():

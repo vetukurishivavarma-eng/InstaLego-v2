@@ -136,6 +136,46 @@ def _ensure_all_transactions_present(narrative: str, facts: dict) -> str:
     return f"{narrative}\n\nAdditional prior transactions on record (per Encumbrance Certificate):\n{missing_lines}"
 
 
+def _ensure_verified_party_identities_present(narrative: str, facts: dict) -> str:
+    """Guarantee the real seller/buyer NAMES (never their relation-clause
+    names) are present in the chain-of-ownership narrative, the same
+    restrained way verified flags and transactions are guaranteed present
+    elsewhere in this module — an LLM given correctly-extracted party names
+    is not something this project treats as guaranteed to narrate correctly.
+
+    Confirmed live: given a seller extracted exactly as {"name": "Sri. K.
+    Rama Rao", "relation": "S/o Sri. K. Venkata Rao"} and a buyer extracted
+    exactly as {"name": "Smt. P. Lakshmi Devi", "relation": "W/o Sri. P.
+    Suresh"} — both fields correctly separated by the extraction layer, no
+    fabrication there — the opinion-generation model still wrote the
+    relation-clause names (the vendor's father, the vendee's husband) into
+    the narrative as if they were the transacting parties, directly
+    contradicting its own prompt rule that a relation clause names a
+    different person, not a party. This does not attempt to edit or strip
+    the model's incorrect prose (parsing/rewriting free text reliably is far
+    riskier than appending) — it guarantees the real names are also present,
+    matching the same restrained approach already used for flags/
+    transactions rather than a new, more invasive mechanism."""
+    missing: list[tuple[str, str, str]] = []
+    for deed in facts.get("sale_deeds") or []:
+        label = f"Sale Deed {deed.get('document_number') or '(document number not stated)'}"
+        for role, parties in (("Seller(s)", deed.get("sellers") or []), ("Buyer(s)", deed.get("buyers") or [])):
+            for party in parties:
+                name = party.get("name")
+                if name and name.lower() not in narrative.lower():
+                    missing.append((label, role, name))
+
+    if not missing:
+        return narrative
+
+    lines = "\n".join(f"- {label} — {role}: {name}" for label, role, name in missing)
+    correction = (
+        "Verified parties per extracted Sale Deed records (a relation clause such as "
+        '"S/o"/"W/o"/"D/o" names a relative, not itself a transacting party):\n' + lines
+    )
+    return f"{narrative}\n\n{correction}"
+
+
 def generate_opinion(
     facts: dict,
     flags: list[Flag],
@@ -169,7 +209,9 @@ Legal Compliance Check, a Risk Flags narrative (restating only the VERIFIED FLAG
 
     return LegalOpinion(
         property_summary=draft.property_summary,
-        chain_of_ownership=_ensure_all_transactions_present(draft.chain_of_ownership, facts),
+        chain_of_ownership=_ensure_verified_party_identities_present(
+            _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+        ),
         encumbrance_status=draft.encumbrance_status,
         legal_compliance_check=draft.legal_compliance_check,
         risk_flags_narrative=_ensure_all_flags_present(draft.risk_flags_narrative, flags),

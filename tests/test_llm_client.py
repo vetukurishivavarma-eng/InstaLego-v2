@@ -23,7 +23,7 @@ def test_missing_base_url_raises_clearly():
 @patch("landtitle.llm.client.requests.post")
 def test_generate_sends_expected_request_shape(mock_post):
     mock_post.return_value = _mock_response("hello back")
-    client = QwenClient(base_url="https://outflank-filler-bullwhip.ngrok-free.dev", api_key=None)
+    client = QwenClient(base_url="https://outflank-filler-bullwhip.ngrok-free.dev", api_key=None, timeout=120.0)
 
     result = client.generate("system prompt", "user prompt", temperature=0.1, max_new_tokens=2048)
 
@@ -38,6 +38,7 @@ def test_generate_sends_expected_request_shape(mock_post):
         "temperature": 0.1,
         "max_tokens": 2048,
     }
+    # Explicit constructor arg, decoupled from config.LLM_API_TIMEOUT's default.
     assert kwargs["timeout"] == 120.0
 
 
@@ -85,14 +86,33 @@ def test_generate_raises_on_connection_failure(mock_post):
         client.generate("sys", "user")
 
 
+@patch("landtitle.llm.client.time.sleep")
 @patch("landtitle.llm.client.requests.post")
-def test_generate_raises_on_timeout(mock_post):
+def test_generate_exhausts_retries_on_persistent_timeout(mock_post, mock_sleep):
     import requests
 
     mock_post.side_effect = requests.exceptions.Timeout("timed out")
     client = QwenClient(base_url="https://example.test")
     with pytest.raises(RuntimeError, match="did not respond within"):
         client.generate("sys", "user")
+
+    # LLM_TRANSIENT_RETRY_ATTEMPTS defaults to 2 -> 3 total attempts.
+    assert mock_post.call_count == 3
+    assert mock_sleep.call_count == 2
+
+
+@patch("landtitle.llm.client.time.sleep")
+@patch("landtitle.llm.client.requests.post")
+def test_generate_retries_on_timeout_then_succeeds(mock_post, mock_sleep):
+    import requests
+
+    mock_post.side_effect = [requests.exceptions.Timeout("timed out"), _mock_response("recovered")]
+    client = QwenClient(base_url="https://example.test")
+    result = client.generate("sys", "user")
+
+    assert result == "recovered"
+    assert mock_post.call_count == 2
+    mock_sleep.assert_called_once()
 
 
 @patch("landtitle.llm.client.requests.post")

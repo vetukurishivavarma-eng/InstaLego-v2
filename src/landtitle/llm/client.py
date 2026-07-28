@@ -96,9 +96,24 @@ class QwenClient:
                 response.raise_for_status()
                 break
             except requests.exceptions.Timeout as exc:
+                # Confirmed live: a real call timed out at exactly the (then-120s) limit
+                # while a second concurrent request was likely queued behind it on the
+                # user's single Kaggle server -- observed real latencies of 47-113s per
+                # call even without contention, so a bare timeout here isn't necessarily
+                # a dead server, and retrying once or twice is worth it before giving up.
+                if attempt < LLM_TRANSIENT_RETRY_ATTEMPTS:
+                    attempt += 1
+                    logger.warning(
+                        "LLM endpoint at %s did not respond within %.0fs (attempt %d/%d), retrying in %.0fs",
+                        url, self.timeout, attempt, LLM_TRANSIENT_RETRY_ATTEMPTS,
+                        LLM_TRANSIENT_RETRY_BACKOFF_SECONDS,
+                    )
+                    time.sleep(LLM_TRANSIENT_RETRY_BACKOFF_SECONDS)
+                    continue
                 raise RuntimeError(
-                    f"LLM endpoint at {url} did not respond within {self.timeout}s. It may be "
-                    f"overloaded, or the Kaggle session behind it may have stalled or restarted."
+                    f"LLM endpoint at {url} did not respond within {self.timeout}s after "
+                    f"{attempt + 1} attempt(s). It may be overloaded, or the Kaggle session "
+                    f"behind it may have stalled or restarted."
                 ) from exc
             except requests.exceptions.ConnectionError as exc:
                 raise RuntimeError(

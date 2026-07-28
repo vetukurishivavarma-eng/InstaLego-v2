@@ -27,7 +27,7 @@ CORPUS_DIR = DATA_DIR / "corpus"
 MODEL_NAME = "Qwen/Qwen2.5-7B-Instruct"
 LLM_API_BASE_URL = os.environ.get("LLM_API_BASE_URL")
 LLM_API_KEY = os.environ.get("LLM_API_KEY")  # optional; only sent as a Bearer token if set
-LLM_API_TIMEOUT = float(os.environ.get("LLM_API_TIMEOUT", "120"))
+LLM_API_TIMEOUT = float(os.environ.get("LLM_API_TIMEOUT", "240"))
 LLM_TEMPERATURE = 0.1  # low temp reduces confident fabrication (extraction + opinion gen)
 LLM_MAX_NEW_TOKENS = 2048
 

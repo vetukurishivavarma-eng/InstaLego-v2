@@ -224,6 +224,27 @@ the app's own root path via a `StaticFiles` mount, so the page's `fetch()`
 calls hit `/opinions` on the same origin with no separate server or CORS
 setup needed.
 
+### Exposing the backend to a Vercel-hosted frontend (ngrok)
+
+If the frontend is instead deployed separately (e.g. on Vercel) while this
+FastAPI backend stays local, expose port 8000 with ngrok in a second
+terminal, alongside the `uvicorn` command above:
+
+```bash
+ngrok http 8000
+```
+
+ngrok prints a forwarding URL like `https://<random-id>.ngrok-free.app` --
+use that as the frontend's backend base URL. (One-time setup on this
+machine, not covered here: `ngrok config add-authtoken <your token>`.)
+
+Because the frontend then calls this API cross-origin, CORS is enabled via
+`fastapi.middleware.cors.CORSMiddleware`, configurable with the
+`LANDTITLE_CORS_ORIGINS` env var (comma-separated origins; defaults to `*`
+for now -- tighten this to the actual `https://*.vercel.app` origin once
+known, since this default has no auth/session state to protect against but
+is still worth narrowing).
+
 Endpoints:
 - `POST /opinions` -- multipart upload. Fields: `sale_deed` (one or more
   files, repeat the field for each; chronological order, oldest first),
@@ -234,6 +255,14 @@ Endpoints:
   booleans, timestamps) -- never document content.
 - `GET /opinions/{job_id}/download` -- the generated PDF once `status` is
   `done` (409 before that, 410 if its retention window has already elapsed).
+- `POST /generate-opinion` -- simpler synchronous alternative to the
+  `/opinions` job flow: same multipart fields (`sale_deed` one-or-more
+  required, `revenue_record` optional, `ec` optional), but this call blocks
+  until the pipeline finishes (can take several minutes) and returns the
+  generated opinion PDF directly (`application/pdf`) instead of a job id.
+  On failure it returns HTTP 500 with `{"detail": "..."}` (a short, safe
+  message -- never a raw traceback); the full exception is logged
+  server-side only.
 
 Required env vars are the same ones the CLI pipeline already needs (see
 "Environment variables" above under "How this connects to the LLM") --

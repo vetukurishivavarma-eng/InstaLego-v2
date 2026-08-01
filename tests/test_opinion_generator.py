@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 from landtitle.opinion.generator import (
     _ensure_all_flags_present,
     _ensure_all_transactions_present,
+    _ensure_no_unverified_relationship_claims,
     _ensure_prior_reference_parties_not_claimed,
     _ensure_verified_party_identities_present,
     generate_opinion,
@@ -263,6 +264,92 @@ def test_generate_opinion_guarantees_flag_even_if_model_omits_it():
 
     assert "Land extent could not be cross-verified" in opinion.risk_flags_narrative
     assert opinion.is_draft is True
+
+
+# Fictional facts reproducing the real structural pattern (two transacting
+# parties whose own relation clauses each name a different, non-transacting
+# relative -- i.e. genuinely unrelated to each other) without any real name.
+_UNRELATED_PARTIES_FACTS = {
+    "sale_deeds": [
+        {
+            "document_number": "5551/2018",
+            "sellers": [{"name": "Sri. N. Somasekhar", "relation": "S/o Sri. N. Venkatappa"}],
+            "buyers": [{"name": "Sri. P. Ravi Teja", "relation": "S/o Sri. P. Chalapathi Rao"}],
+        }
+    ]
+}
+
+# Fictional facts reproducing a genuine family sale: the Buyer's own relation
+# clause actually names the Seller.
+_GENUINE_FAMILY_SALE_FACTS = {
+    "sale_deeds": [
+        {
+            "document_number": "700/2010",
+            "sellers": [{"name": "Sri. B. Koteswara Rao", "relation": None}],
+            "buyers": [{"name": "Sri. B. Srinivas", "relation": "S/o Sri. B. Koteswara Rao"}],
+        }
+    ]
+}
+
+
+def test_ensure_no_unverified_relationship_claims_appends_disclaimer_for_unrelated_parties():
+    # Confirmed live: given a Seller and Buyer whose own relation clauses
+    # each name a different, non-transacting relative (genuinely unrelated
+    # to each other), the model still wrote that the Buyer acquired the
+    # property "from his father" -- misreading the Buyer's own relation
+    # clause as describing the Seller.
+    narrative = (
+        "Sri. P. Ravi Teja acquired the property from his father, Sri. N. Somasekhar, "
+        "under Document No. 5551/2018."
+    )
+    result = _ensure_no_unverified_relationship_claims(narrative, _UNRELATED_PARTIES_FACTS)
+    assert "no relationship between seller(s)" in result.lower()
+    assert "5551/2018" in result
+
+
+def test_ensure_no_unverified_relationship_claims_restates_genuine_relationship():
+    narrative = "Sri. B. Koteswara Rao sold the property to Sri. B. Srinivas."
+    result = _ensure_no_unverified_relationship_claims(narrative, _GENUINE_FAMILY_SALE_FACTS)
+    assert 'S/o Sri. B. Koteswara Rao' in result
+    assert "no relationship between seller(s)" not in result.lower()
+
+
+def test_ensure_no_unverified_relationship_claims_noop_with_no_sale_deed_data():
+    assert _ensure_no_unverified_relationship_claims("Some narrative.", {}) == "Some narrative."
+
+
+def test_ensure_no_unverified_relationship_claims_noop_when_buyers_missing():
+    facts = {"sale_deeds": [{"document_number": "1/2020", "sellers": [{"name": "Sri. X"}], "buyers": []}]}
+    assert _ensure_no_unverified_relationship_claims("Some narrative.", facts) == "Some narrative."
+
+
+def test_ensure_no_unverified_relationship_claims_idempotent():
+    once = _ensure_no_unverified_relationship_claims("Some narrative.", _UNRELATED_PARTIES_FACTS)
+    twice = _ensure_no_unverified_relationship_claims(once, _UNRELATED_PARTIES_FACTS)
+    assert once == twice
+
+
+def test_generate_opinion_guarantees_relationship_disclaimer_even_if_model_fabricates_it():
+    """End-to-end through generate_opinion() reproducing the exact real
+    failure: the model invented a father-son relationship between two
+    genuinely unrelated transacting parties by misreading the Buyer's own
+    relation clause as describing the Seller."""
+    client = MagicMock()
+    client.extract_structured.return_value = MagicMock(
+        property_summary="",
+        chain_of_ownership=(
+            "Sri. P. Ravi Teja acquired the property from his father, Sri. N. Somasekhar, "
+            "under Document No. 5551/2018."
+        ),
+        encumbrance_status="",
+        legal_compliance_check="",
+        risk_flags_narrative="No inconsistencies found.",
+        overall_recommendation="Clear Title",
+    )
+
+    opinion = generate_opinion(facts=_UNRELATED_PARTIES_FACTS, flags=[], citations=[], client=client)
+
+    assert "no relationship between seller(s)" in opinion.chain_of_ownership.lower()
 
 
 def test_generate_opinion_guarantees_earlier_transactions_even_if_model_omits_them():

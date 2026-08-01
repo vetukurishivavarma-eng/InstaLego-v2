@@ -57,6 +57,12 @@ CURRENT deed's own recital, not a separate party extraction. NEVER name, imply, 
 transferred that prior property to whom, and NEVER reuse a relation clause (e.g. "S/o [Name]") \
 belonging to a CURRENT party as if that person were the transferor in a prior transaction. State \
 only that the prior document exists (its number and date) — do not narrate a transfer for it.
+8. A relation clause (e.g. "S/o [Name]") on a Seller or Buyer names that person's OWN parent or \
+spouse — it does NOT mean the other transacting party in this deed is that relative, unless the \
+named relative is separately listed as a Seller or Buyer in this same deed. Do not describe the \
+Buyer as having acquired the property "from his father" (or any other family relationship to the \
+Seller) unless that exact relationship is evidenced by the extracted party data — most sales are \
+between unrelated parties, and inventing a family relationship between them is a fabrication.
 """
 
 
@@ -243,6 +249,115 @@ def _ensure_prior_reference_parties_not_claimed(narrative: str, facts: dict) -> 
     return f"{narrative}\n\n{disclaimer}"
 
 
+_HONORIFIC_TOKENS = {"sri", "smt", "shri", "kum", "m/s"}
+
+
+def _normalize_party_name(name: str) -> str:
+    """Strip honorifics/punctuation so 'Sri. T. Appala Naidu' can be matched
+    as a substring of a free-text relation clause like 'S/o Sri. T. Appala
+    Naidu' — the two are written identically in source documents except for
+    the relation-clause prefix."""
+    tokens = [t.strip(".,") for t in name.strip().split()]
+    tokens = [t for t in tokens if t.lower().rstrip(".") not in _HONORIFIC_TOKENS]
+    return " ".join(tokens).lower()
+
+
+def _find_genuine_party_relationships(deed: dict) -> list[tuple[str, str, str]]:
+    """Return (party_name, related_party_name, relation_clause) for every
+    relationship actually evidenced between two named parties to THIS deed —
+    determined by whether one party's own `relation` field names another
+    party to the same deed, never inferred from narrative prose. A relation
+    clause naming someone who is NOT separately listed as a party is a real
+    person but not a genuine party-to-party relationship for this check."""
+    sellers = deed.get("sellers") or []
+    buyers = deed.get("buyers") or []
+    parties = sellers + buyers
+    found: list[tuple[str, str, str]] = []
+    for party in parties:
+        name, relation = party.get("name"), party.get("relation")
+        if not name or not relation:
+            continue
+        relation_norm = _normalize_party_name(relation)
+        for other in parties:
+            other_name = other.get("name")
+            if not other_name or other_name == name:
+                continue
+            if _normalize_party_name(other_name) in relation_norm:
+                found.append((name, other_name, relation))
+    return found
+
+
+def _ensure_no_unverified_relationship_claims(narrative: str, facts: dict) -> str:
+    """Guarantee the actual, evidenced relationship (or lack of one) between
+    each deed's transacting parties is present in the chain-of-ownership
+    narrative, the same restrained append-only way as this module's other
+    `_ensure_*` guards — an LLM told not to invent a family relationship
+    between unrelated parties is not something this project treats as
+    guaranteed (see rule 8 in SYSTEM_PROMPT, which already existed for the
+    prior-reference case and still didn't prevent this new variant).
+
+    Confirmed live: given a Seller and Buyer extracted as genuinely
+    unrelated individuals (each party's own `relation` field names a
+    different person, not the other transacting party), the opinion model
+    still wrote that the Buyer acquired the property "from his father" —
+    misreading the Buyer's OWN relation clause (naming the Buyer's actual
+    father, who is not a party to this deed at all) as describing the
+    Seller. This is a new variant of the same underlying failure mode as
+    `_ensure_verified_party_identities_present` (substituting a relation-
+    clause name for a real party) and `_ensure_prior_reference_parties_not_
+    claimed` (inventing a transfer relationship the data doesn't support) —
+    consistent with this project's finding that an explicit prompt rule
+    against a specific mistake does not reliably prevent it.
+
+    Unlike those two guards, this one has two distinct outcomes depending on
+    what the data actually shows for each deed with both a Seller and Buyer:
+    - No party's relation clause names the other transacting party: the deal
+      is presumptively between unrelated parties, so an unconditional
+      disclaimer is appended stating no relationship is evidenced (this
+      covers the confirmed failure above regardless of exactly how the
+      model's prose worded the fabricated relationship).
+    - A party's relation clause DOES name the other transacting party (e.g.
+      a real family sale): the genuine relationship is restated as verified
+      ground truth instead, guarding against the model mislabeling or
+      omitting a real relationship rather than inventing a false one.
+    Both branches follow the project's append-only pattern — never editing
+    or stripping the model's own prose."""
+    notes: list[str] = []
+    for deed in facts.get("sale_deeds") or []:
+        sellers = deed.get("sellers") or []
+        buyers = deed.get("buyers") or []
+        if not sellers or not buyers:
+            continue  # nothing to compare a relationship between
+
+        label = f"Sale Deed {deed.get('document_number') or '(document number not stated)'}"
+        genuine = _find_genuine_party_relationships(deed)
+        if genuine:
+            for name, related_name, relation in genuine:
+                note = f"- {label}: {name}'s own relation clause (\"{relation}\") names {related_name}."
+                if note not in notes:
+                    notes.append(note)
+        else:
+            seller_names = ", ".join(p.get("name") for p in sellers if p.get("name"))
+            buyer_names = ", ".join(p.get("name") for p in buyers if p.get("name"))
+            notes.append(
+                f"- {label}: no relationship between Seller(s) ({seller_names}) and Buyer(s) "
+                f"({buyer_names}) is evidenced by the extracted party data — any relation clause "
+                'shown for a party (e.g. "S/o [Name]") names only that party\'s own relative, not '
+                "the other transacting party, unless that relative is separately listed as a party "
+                "above."
+            )
+
+    if not notes:
+        return narrative
+
+    marker = "verified relationship data for this transaction"
+    if marker in narrative.lower():
+        return narrative
+
+    header = "Note on verified relationship data for this transaction (per extracted party records):"
+    return f"{narrative}\n\n{header}\n" + "\n".join(notes)
+
+
 def generate_opinion(
     facts: dict,
     flags: list[Flag],
@@ -276,9 +391,12 @@ Legal Compliance Check, a Risk Flags narrative (restating only the VERIFIED FLAG
 
     return LegalOpinion(
         property_summary=draft.property_summary,
-        chain_of_ownership=_ensure_prior_reference_parties_not_claimed(
-            _ensure_verified_party_identities_present(
-                _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+        chain_of_ownership=_ensure_no_unverified_relationship_claims(
+            _ensure_prior_reference_parties_not_claimed(
+                _ensure_verified_party_identities_present(
+                    _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+                ),
+                facts,
             ),
             facts,
         ),

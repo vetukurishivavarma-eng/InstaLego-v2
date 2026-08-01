@@ -258,6 +258,28 @@ right now.
   alongside the deterministic correction; a reviewer has everything needed
   to catch the problem, but the narrative itself isn't cleaned up. Treat
   this as an open, harder problem for future work, not resolved.
+- **A second variant of the party-relationship confusion above: the model
+  invents a family relationship between the deed's own transacting parties.**
+  Confirmed live: given a Seller and Buyer whose own `relation` fields each
+  name a *different*, non-transacting relative (i.e. genuinely unrelated to
+  each other), the opinion model wrote that the Buyer acquired the property
+  "from his father," misreading the Buyer's own relation clause (naming the
+  Buyer's actual father, not a party to the deed) as describing the Seller.
+  This happened despite an existing prompt rule against exactly the
+  sibling issue (reusing a relation-clause name as if it were a party) —
+  confirming again that a prompt rule alone doesn't reliably prevent a new
+  shape of the same underlying mistake. Fixed with
+  `_ensure_no_unverified_relationship_claims()` in `opinion/generator.py`
+  (same append-only pattern as this module's other `_ensure_*` guards): for
+  each deed with both a Seller and Buyer, if no party's own relation clause
+  names the other transacting party, an unconditional disclaimer is
+  appended stating no relationship is evidenced between them; if one
+  genuinely does (a real family sale), the actual relationship is restated
+  as verified ground truth instead. Live-verified against the project's
+  standing `deed_A_2005_standalone.txt` fixture: the disclaimer fired
+  correctly even on a run where the model's own prose happened not to
+  fabricate the relationship — confirming the guard is deterministic and
+  doesn't depend on re-observing the bug.
 - **Footnote/amendment lines must be filtered before section-splitting** the
   source Acts, or they get misidentified as section boundaries and corrupt
   the corpus (`legal/corpus_builder.is_footnote_line`).
@@ -265,6 +287,26 @@ right now.
   programmatically from each retrieved chunk — never left to the LLM to
   recall from memory, which was confirmed to fabricate plausible-sounding
   wrong section numbers even against a clean corpus.
+- **Citation *number* fabrication is prevented by design, but citation
+  *relevance* is not verified separately — confirmed live with a real,
+  non-fabricated but arguably inapposite citation.** An opinion cited
+  "Transfer of Property Act, Section 30" ("Prior disposition not affected
+  by invalidity of ulterior disposition") in support of a routine
+  chain-of-title gap — checked against `data/acts/transfer_of_property_
+  act_1882.txt` and the built corpus, the section number and text are both
+  real (not invented), so the citation-label guarantee above held. But
+  Section 30 is actually about the validity of a *conditional/contingent*
+  disposition (e.g. "transfer to B for life, and if she doesn't do X, then
+  to C") — a different legal concept from an undocumented prior title deed.
+  Likely cause: `pipeline.select_citations()` uses each flag's `issue` text
+  directly as a semantic search query, and the flag
+  `"Prior title reference not independently evidenced"` shares enough
+  surface wording with the section text ("**Prior** **disposition**...")
+  to rank as a semantic match despite the legal concepts being unrelated.
+  Not fixed — flagged here as a real, open retrieval-relevance gap distinct
+  from the citation-fabrication problem this project already solved; a
+  reviewer needs to sanity-check that cited sections are actually
+  *applicable*, not just real.
 
 ## Web API (local)
 
@@ -345,7 +387,7 @@ this section is local-run only.
 
 ## What has and hasn't been run in this environment
 
-72 unit tests pass (`python -m pytest tests/`), covering every pure-logic
+127 unit tests pass (`python -m pytest tests/`), covering every pure-logic
 layer: verification checks (including multi-deed chain continuity), footnote
 filtering/section splitting, EC table flattening, party dedup/merge across
 OCR-garbled chunks, opinion-generator flag/transaction-omission guards, PDF

@@ -5,6 +5,7 @@ from landtitle.opinion.generator import (
     _ensure_all_transactions_present,
     _ensure_no_unverified_relationship_claims,
     _ensure_prior_reference_parties_not_claimed,
+    _ensure_verified_deed_registration_details_present,
     _ensure_verified_party_identities_present,
     generate_opinion,
 )
@@ -350,6 +351,65 @@ def test_generate_opinion_guarantees_relationship_disclaimer_even_if_model_fabri
     opinion = generate_opinion(facts=_UNRELATED_PARTIES_FACTS, flags=[], citations=[], client=client)
 
     assert "no relationship between seller(s)" in opinion.chain_of_ownership.lower()
+
+
+# Fictional facts reproducing the real cross-contamination pattern: two
+# deeds submitted together, each with its own distinct registration_date.
+_MULTI_DEED_DATE_FACTS = {
+    "sale_deeds": [
+        {
+            "document_number": "9001/2015", "registration_date": "10-03-2015",
+            "sellers": [{"name": "Sri. A. Owner"}], "buyers": [{"name": "Sri. B. Owner"}],
+        },
+        {
+            "document_number": "9050/2018", "registration_date": "22-08-2018",
+            "sellers": [{"name": "Sri. B. Owner"}], "buyers": [{"name": "Sri. C. Owner"}],
+        },
+    ]
+}
+
+
+def test_ensure_verified_deed_registration_details_present_appends_missing_date():
+    # Confirmed live: the narrative stated one deed's document number
+    # alongside a DIFFERENT deed's date, so the correct date for the first
+    # deed never appears anywhere in the text.
+    narrative = "Sale Deed 9001/2015 was registered on 22-08-2018."  # borrowed from the other deed
+    result = _ensure_verified_deed_registration_details_present(narrative, _MULTI_DEED_DATE_FACTS)
+    assert "9001/2015: registration date is 10-03-2015" in result
+
+
+def test_ensure_verified_deed_registration_details_present_noop_when_correct():
+    correct = "Sale Deed 9001/2015 was registered on 10-03-2015. Sale Deed 9050/2018 was registered on 22-08-2018."
+    assert _ensure_verified_deed_registration_details_present(correct, _MULTI_DEED_DATE_FACTS) == correct
+
+
+def test_ensure_verified_deed_registration_details_present_noop_with_no_sale_deed_data():
+    assert _ensure_verified_deed_registration_details_present("Some narrative.", {}) == "Some narrative."
+
+
+def test_ensure_verified_deed_registration_details_present_idempotent():
+    once = _ensure_verified_deed_registration_details_present("Some narrative.", _MULTI_DEED_DATE_FACTS)
+    twice = _ensure_verified_deed_registration_details_present(once, _MULTI_DEED_DATE_FACTS)
+    assert once == twice
+
+
+def test_generate_opinion_guarantees_registration_date_even_if_model_cross_contaminates():
+    """End-to-end through generate_opinion() reproducing the exact real
+    failure: the model stated a document number from one deed alongside the
+    registration date belonging to a different submitted deed."""
+    client = MagicMock()
+    client.extract_structured.return_value = MagicMock(
+        property_summary="",
+        chain_of_ownership="Sale Deed 9001/2015 was registered on 22-08-2018.",
+        encumbrance_status="",
+        legal_compliance_check="",
+        risk_flags_narrative="No inconsistencies found.",
+        overall_recommendation="Clear Title",
+    )
+
+    opinion = generate_opinion(facts=_MULTI_DEED_DATE_FACTS, flags=[], citations=[], client=client)
+
+    assert "9001/2015: registration date is 10-03-2015" in opinion.chain_of_ownership
 
 
 def test_generate_opinion_guarantees_earlier_transactions_even_if_model_omits_them():

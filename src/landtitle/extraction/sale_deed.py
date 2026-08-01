@@ -16,6 +16,11 @@ identity in `represented_by_gpa`, never in the seller's own `name` field.
 number (e.g. "Vendor No.1, 2 and Vendor No.3 through their GPA holder ... do hereby sell"). That \
 back-reference is NOT a new party — do not create a separate seller/buyer entry for it. Only add \
 an entry when the text gives an actual person's name.
+- A deed's recital may explain how the CURRENT seller themselves acquired the property, naming an \
+earlier document (`prior_title_deed_references`). This earlier document is often NOT a sale — it \
+may be a Partition Deed, Gift Deed, Settlement Deed, Will, or other instrument. Always capture the \
+TYPE of instrument exactly as the text names it, alongside its document number and date. Never \
+assume or default to "Sale Deed" for a prior reference — copy only what the text actually says.
 - If a field is not present in the text, leave it null. Do not guess or infer.
 """
 

@@ -58,7 +58,16 @@ class SaleDeed(BaseModel):
     sale_consideration: Optional[str] = None
     registration_date: Optional[str] = None
     document_number: Optional[str] = None
-    prior_title_deed_references: list[str] = Field(default_factory=list)
+    prior_title_deed_references: list[str] = Field(
+        default_factory=list,
+        description="Each entry describes one prior document the recital refers to as the source "
+        "of the seller's own title. MUST include the TYPE of instrument exactly as the source text "
+        "names it (Sale Deed, Partition Deed, Gift Deed, Settlement Deed, Will, etc.), never just "
+        "the document number and date on their own -- the instrument type materially changes the "
+        "legal nature of the prior transaction and must not be dropped or assumed to be a sale. "
+        "Copy the type, number, and date only from what this specific source text actually states; "
+        "never invent, guess, or default to 'Sale Deed' when the text names a different instrument.",
+    )
     encumbrance_declaration: Optional[str] = None
     sub_registrar_office: Optional[str] = None
     property_description: Optional[str] = None

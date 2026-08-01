@@ -207,38 +207,169 @@ def active_encumbrance_check(ec: EncumbranceCertificate) -> list[Flag]:
 
 
 def owner_chain_continuity_check(sale_deeds: list[SaleDeed]) -> list[Flag]:
-    """Verify each deed's buyer(s) become the next deed's seller(s), in
-    chronological order. Deeds must be pre-sorted or will be sorted here by
-    registration_date; a gap or unexplained jump is flagged, but the mere
-    fact that parties differ between deeds is expected and not itself a flag."""
+    """Verify each deed's seller(s) can be traced to a buyer in an earlier
+    submitted deed. The mere fact that parties differ between deeds is
+    expected and not itself a flag; only a genuine missing link is.
+
+    Two resolution strategies, tried in order for each deed:
+    1. If this deed's own `prior_title_deed_references` resolves (by
+       document number, via `_matching_document_number`) to another
+       submitted deed, that IS this deed's self-declared predecessor --
+       compare THAT specific deed's buyer(s) against this deed's seller(s).
+       This is the strongest signal: it checks what the deed itself claims,
+       not an assumption about ordering.
+    2. Otherwise, compare this deed's seller(s) against the buyer(s) of the
+       WHOLE SET of submitted deeds with a strictly earlier registration_date
+       (not one single "nearest" deed) -- if none match, flag a gap.
+
+    Deliberately NOT based on sorting all deeds by registration_date and
+    comparing date-adjacent PAIRS (the prior implementation). Confirmed live
+    with this project's own synthetic 3-deed test set: Deed A and Deed B
+    share the exact same registration_date (15-07-2012) -- a real, expected
+    situation (same-day back-to-back registrations), not a data error. A
+    tie on the sort key makes Python's stable sort fall back to whatever
+    order the deeds happened to be passed in to this function, which has no
+    logical relationship to the real chain. This produced a false-positive
+    "Chain of title gap" pairing Deed B's buyer against Deed A's seller --
+    the wrong comparison entirely -- purely because of input order, while
+    the real A->B link (which both deeds' own recitals agree on) went
+    unchecked. Strategy 1 above sidesteps the tie using the deeds' own
+    evidence instead of guessing an order; strategy 2 sidesteps it by
+    comparing against the whole earlier-dated SET rather than picking one
+    deed as "the" predecessor, so a tie within that set (as long as it
+    doesn't include the deed under test) is harmless.
+
+    A deed with no captured `sellers` is skipped entirely (nothing to
+    verify a link FROM) -- consistent with this module's "missing data is
+    not itself a conflict" principle elsewhere (see e.g. `boundary_match`).
+    A deed whose prior reference does NOT resolve to any submitted deed
+    (including a near-miss, e.g. one digit off) falls through to strategy 2
+    rather than being flagged directly here -- an unresolvable reference is
+    `unevidenced_prior_reference_check`'s job, since without a resolved
+    predecessor there is no specific comparison to make.
+
+    Strategy 2's date key falls back to the YEAR embedded in the deed's own
+    `document_number` (the standard Indian sub-registrar "NNNN/YYYY" format)
+    when `registration_date` itself didn't parse. Confirmed live, with this
+    project's own real 3-deed test set: a deed's text can state its
+    execution date ("made and executed on this the Nth day of ...") without
+    ever separately stating a distinct registration date for its OWN
+    document number, and extraction correctly leaves `registration_date`
+    null rather than guessing -- but that then made strategy 2 skip the
+    deed entirely (no date key at all), silently losing a genuine,
+    real chain-of-title break that strategy 2 exists to catch. The
+    document number's year suffix is reliably present (it's how the
+    document is legally identified) even when a separate date sentence
+    is absent, so it's a safe fallback signal -- year-only granularity
+    can't order two deeds within the SAME year, but that's fine here:
+    same-year deeds are exactly the case strategy 1 (reference-based
+    linking) is meant to resolve; strategy 2 only needs to place deeds
+    from DIFFERENT years in the right relative order.
+
+    Confirmed live: naively mixing an exact parsed date with a year-only
+    fallback (defaulting the missing month/day to January 1st) is NOT safe
+    to compare directly with `<` -- it made a same-year deed with only a
+    year-only fallback key look "earlier" than another same-year deed that
+    has a real, later-in-the-year exact date, purely because Jan 1st sorts
+    before any other day in that year. `_date_key` therefore returns
+    `(year, exact_datetime_or_None)`, and `_is_strictly_earlier` below only
+    trusts day-level ordering when BOTH sides have an exact date; a
+    year-only key is only ever compared at year granularity."""
     flags: list[Flag] = []
     if len(sale_deeds) < 2:
         return flags
 
-    def _sort_key(deed: SaleDeed):
+    def _date_key(deed: SaleDeed) -> tuple[int, datetime | None] | None:
         for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d"):
             try:
-                return datetime.strptime(deed.registration_date, fmt)
+                exact = datetime.strptime(deed.registration_date, fmt)
+                return (exact.year, exact)
             except (ValueError, TypeError):
                 continue
-        return datetime.min
+        if deed.document_number:
+            match = re.search(r"/(\d{4})\b", deed.document_number)
+            if match:
+                return (int(match.group(1)), None)
+        return None
 
-    deeds_sorted = sorted(sale_deeds, key=_sort_key)
+    def _is_strictly_earlier(key_a: tuple[int, datetime | None], key_b: tuple[int, datetime | None]) -> bool:
+        year_a, exact_a = key_a
+        year_b, exact_b = key_b
+        if year_a != year_b:
+            return year_a < year_b
+        if exact_a is not None and exact_b is not None:
+            return exact_a < exact_b
+        return False  # same year, at least one side is a year-only estimate -- can't say
 
-    for i in range(len(deeds_sorted) - 1):
-        current, nxt = deeds_sorted[i], deeds_sorted[i + 1]
-        current_label = f"Sale Deed {current.document_number or i}"
-        next_label = f"Sale Deed {nxt.document_number or i + 1}"
+    known_document_numbers = [d.document_number.strip() for d in sale_deeds if d.document_number]
+    deeds_by_docnum = {d.document_number.strip(): d for d in sale_deeds if d.document_number}
+    dated = [(d, _date_key(d)) for d in sale_deeds]
 
-        for buyer in current.buyers:
-            found = any(name_similarity_check(buyer.name, seller.name)[0] for seller in nxt.sellers)
+    for deed in sale_deeds:
+        if not deed.sellers:
+            continue  # nothing to verify a link from
+
+        deed_label = f"Sale Deed {deed.document_number or '(document number not captured)'}"
+
+        resolved_predecessor = None
+        for reference in deed.prior_title_deed_references:
+            if not reference or not reference.strip():
+                continue
+            docnum = _matching_document_number(reference, known_document_numbers)
+            if docnum and deeds_by_docnum[docnum] is not deed:
+                resolved_predecessor = deeds_by_docnum[docnum]
+                break
+
+        if resolved_predecessor is not None:
+            predecessor_label = f"Sale Deed {resolved_predecessor.document_number}"
+            found = any(
+                name_similarity_check(buyer.name, seller.name)[0]
+                for buyer in resolved_predecessor.buyers
+                for seller in deed.sellers
+            )
             if not found:
+                buyer_names = ", ".join(b.name for b in resolved_predecessor.buyers) or "none captured"
+                seller_names = ", ".join(s.name for s in deed.sellers) or "none captured"
                 flags.append(Flag(
                     issue="Chain of title gap",
                     severity="high",
-                    detail=f"Buyer '{buyer.name}' in {current_label} does not appear as a seller in {next_label}.",
-                    documents_compared=[current_label, next_label],
+                    detail=(
+                        f"{deed_label} recites {predecessor_label} as its predecessor, but "
+                        f"{predecessor_label}'s buyer(s) ({buyer_names}) do not match {deed_label}'s "
+                        f"seller(s) ({seller_names})."
+                    ),
+                    documents_compared=[predecessor_label, deed_label],
                 ))
+            continue
+
+        my_key = _date_key(deed)
+        if my_key is None:
+            continue
+        earlier_deeds = [d for d, k in dated if k is not None and _is_strictly_earlier(k, my_key)]
+        if not earlier_deeds:
+            continue
+
+        found = any(
+            name_similarity_check(buyer.name, seller.name)[0]
+            for earlier in earlier_deeds
+            for buyer in earlier.buyers
+            for seller in deed.sellers
+        )
+        if not found:
+            earlier_labels = ", ".join(f"Sale Deed {d.document_number or '(unlabeled)'}" for d in earlier_deeds)
+            seller_names = ", ".join(s.name for s in deed.sellers) or "none captured"
+            flags.append(Flag(
+                issue="Chain of title gap",
+                severity="high",
+                detail=(
+                    f"{deed_label}'s seller(s) ({seller_names}) do not match any buyer among the "
+                    f"earlier submitted deed(s) by registration date ({earlier_labels}), and no "
+                    f"prior-title reference on {deed_label} resolves to one of them either."
+                ),
+                documents_compared=[deed_label] + [
+                    f"Sale Deed {d.document_number}" for d in earlier_deeds if d.document_number
+                ],
+            ))
     return flags
 
 
@@ -259,7 +390,14 @@ def _document_number_candidates(reference: str) -> list[str]:
     return matches if matches else [reference.strip()]
 
 
-def _reference_is_evidenced(reference: str, known_document_numbers: list[str]) -> bool:
+def _matching_document_number(reference: str, known_document_numbers: list[str]) -> str | None:
+    """Return the known document number `reference` resolves to (by exact or
+    substring match on the number-shaped candidates `_document_number_
+    candidates` extracts), or None. Factored out of `_reference_is_evidenced`
+    so callers that need to know WHICH document matched -- not just whether
+    one did -- can reuse the exact same matching rule (see
+    `owner_chain_continuity_check`, which needs the actual deed object to
+    compare parties against)."""
     candidates = _document_number_candidates(reference)
     for known in known_document_numbers:
         if not known:
@@ -269,12 +407,19 @@ def _reference_is_evidenced(reference: str, known_document_numbers: list[str]) -
             if not candidate:
                 continue
             if candidate == known_norm or candidate in known_norm or known_norm in candidate:
-                return True
-        # Last-resort fuzzy compare on the full strings, for the case where
-        # neither side yields a clean number-shaped substring to compare.
-        if fuzz.token_sort_ratio(reference.lower(), known_norm.lower()) >= NAME_SIMILARITY_THRESHOLD:
-            return True
-    return False
+                return known_norm
+    return None
+
+
+def _reference_is_evidenced(reference: str, known_document_numbers: list[str]) -> bool:
+    if _matching_document_number(reference, known_document_numbers) is not None:
+        return True
+    # Last-resort fuzzy compare on the full strings, for the case where
+    # neither side yields a clean number-shaped substring to compare.
+    return any(
+        fuzz.token_sort_ratio(reference.lower(), known.strip().lower()) >= NAME_SIMILARITY_THRESHOLD
+        for known in known_document_numbers if known
+    )
 
 
 def unevidenced_prior_reference_check(

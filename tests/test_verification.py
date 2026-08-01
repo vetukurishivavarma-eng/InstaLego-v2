@@ -184,6 +184,131 @@ def test_owner_chain_gap_flags_high():
     assert flags[0].severity == "high"
 
 
+def test_owner_chain_same_date_tie_resolved_correctly_via_reference():
+    # Reproduces the real bug (fictionalized): Deed A and Deed B share the
+    # exact same registration_date (a real, expected situation, not a data
+    # error). The old sort-by-date + compare-adjacent-pairs implementation
+    # was order-dependent on submission order for a tie like this and could
+    # pair Deed B's buyer against Deed A's seller -- the wrong comparison
+    # entirely. Deed B's own recital correctly cites Deed A's document
+    # number as its predecessor; that reference must be used to resolve the
+    # link, not accidental input order. Submitted deliberately as [B, A] to
+    # prove the fix doesn't depend on submission order.
+    deed_a = make_sale_deed(
+        document_number="D-A", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Original Owner")],
+        buyers=[Party(name="Sri. Middle Owner")],
+    )
+    deed_b = make_sale_deed(
+        document_number="D-B", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Middle Owner")],
+        buyers=[Party(name="Sri. Final Owner")],
+        prior_title_deed_references=["Document No. D-A"],
+    )
+    flags = owner_chain_continuity_check([deed_b, deed_a])
+    assert flags == []
+
+
+def test_owner_chain_same_date_tie_with_reference_mismatch_flags():
+    # Same tie as above, but Deed B's declared predecessor's buyer does NOT
+    # match Deed B's own seller -- a genuine break must still be caught via
+    # the resolved reference, not masked by the tie.
+    deed_a = make_sale_deed(
+        document_number="D-A", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Original Owner")],
+        buyers=[Party(name="Sri. Middle Owner")],
+    )
+    deed_b = make_sale_deed(
+        document_number="D-B", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Someone Unrelated")],
+        buyers=[Party(name="Sri. Final Owner")],
+        prior_title_deed_references=["Document No. D-A"],
+    )
+    flags = owner_chain_continuity_check([deed_b, deed_a])
+    assert len(flags) == 1
+    assert flags[0].severity == "high"
+    assert "D-A" in flags[0].detail and "D-B" in flags[0].detail
+
+
+def test_owner_chain_fallback_catches_gap_despite_unrelated_same_date_tie():
+    # Reproduces the real 3-deed scenario (fictionalized): Deed A and Deed B
+    # are tied on registration_date (resolved via reference, see above) --
+    # Deed C is later and has a genuinely broken link (its recital cites a
+    # document number that matches neither A nor B). The fallback strategy
+    # must still catch the real break by checking Deed C's seller against
+    # the whole earlier-dated SET, without needing to pick a single
+    # "predecessor" from the tied A/B pair.
+    deed_a = make_sale_deed(
+        document_number="D-A", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Original Owner")],
+        buyers=[Party(name="Sri. Middle Owner")],
+    )
+    deed_b = make_sale_deed(
+        document_number="D-B", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Middle Owner")],
+        buyers=[Party(name="Sri. Later Owner")],
+        prior_title_deed_references=["Document No. D-A"],
+    )
+    deed_c = make_sale_deed(
+        document_number="D-C", registration_date="09-11-2020",
+        sellers=[Party(name="Sri. Total Stranger")],
+        buyers=[Party(name="Smt. New Buyer")],
+        prior_title_deed_references=["Document No. D-WRONG"],  # doesn't match D-A or D-B
+    )
+    flags = owner_chain_continuity_check([deed_b, deed_c, deed_a])
+    # Exactly one flag total: the genuine D-C break. The clean A->B link
+    # (resolved via reference despite the date tie) must not also be
+    # flagged as a separate, wrongly-paired conflict.
+    assert len(flags) == 1
+    assert flags[0].severity == "high"
+    assert "D-C" in flags[0].detail
+
+
+def test_owner_chain_docnum_year_fallback_used_when_registration_date_missing():
+    # Reproduces the real bug (fictionalized): confirmed live that a real
+    # deed's own text can state an execution date without ever separately
+    # stating a distinct registration date, so extraction correctly leaves
+    # registration_date null. Deed B here has no registration_date at all;
+    # only its document_number's own year suffix ("/2012") is available.
+    # Deed C (a later, genuinely broken link) must still be caught using
+    # that fallback, without Deed A being falsely flagged against Deed B.
+    deed_a = make_sale_deed(
+        document_number="2789/2012", registration_date="15-07-2012",
+        sellers=[Party(name="Sri. Original Seller")],
+        buyers=[Party(name="Sri. Middle Owner")],
+    )
+    deed_b = make_sale_deed(
+        document_number="3010/2012", registration_date=None,  # not captured, only doc number's year available
+        sellers=[Party(name="Sri. Middle Owner")],
+        buyers=[Party(name="Sri. Later Owner")],
+        prior_title_deed_references=["Document No. 2789/2012"],
+    )
+    deed_c = make_sale_deed(
+        document_number="4522/2020", registration_date=None,
+        sellers=[Party(name="Sri. Total Stranger")],
+        buyers=[Party(name="Smt. New Buyer")],
+        prior_title_deed_references=["Document No. 9999/2012"],  # doesn't match A or B
+    )
+    flags = owner_chain_continuity_check([deed_a, deed_b, deed_c])
+    # Exactly one flag: the genuine Deed C break. Deed A must NOT be flagged
+    # against Deed B just because Deed B's year-only fallback key (which
+    # defaults to January 1st) would otherwise look "earlier" than Deed A's
+    # real, later-in-the-year exact date.
+    assert len(flags) == 1
+    assert "4522/2020" in flags[0].detail
+
+
+def test_owner_chain_root_deed_with_no_sellers_not_flagged():
+    # A deed with no captured sellers at all (e.g. the very first/root deed
+    # in a chain, or an extraction gap) has nothing to verify a link FROM --
+    # must not be treated as a conflict on its own.
+    deed_a = make_sale_deed(document_number="D-A", registration_date="01-01-2000", sellers=[],
+                             buyers=[Party(name="Sri. Middle Owner")])
+    deed_b = make_sale_deed(document_number="D-B", registration_date="01-01-2010",
+                             sellers=[Party(name="Sri. Middle Owner")], buyers=[Party(name="Sri. Final Owner")])
+    assert owner_chain_continuity_check([deed_a, deed_b]) == []
+
+
 def test_owner_chain_different_buyers_same_date_not_flagged_as_conflict():
     """Confirmed failure mode: co-buyers on the same date, or simply
     different parties across time, must NOT be treated as a conflict on

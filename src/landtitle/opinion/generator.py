@@ -63,6 +63,10 @@ named relative is separately listed as a Seller or Buyer in this same deed. Do n
 Buyer as having acquired the property "from his father" (or any other family relationship to the \
 Seller) unless that exact relationship is evidenced by the extracted party data — most sales are \
 between unrelated parties, and inventing a family relationship between them is a fabrication.
+9. When facts for MULTIPLE Sale Deeds are provided, each deed's own document_number, \
+registration_date, and parties belong ONLY to that deed. Never state a date, document number, or \
+name from one deed's facts as if it belonged to a different deed — double-check which deed's own \
+data you are describing before writing a sentence about it.
 """
 
 
@@ -358,6 +362,53 @@ def _ensure_no_unverified_relationship_claims(narrative: str, facts: dict) -> st
     return f"{narrative}\n\n{header}\n" + "\n".join(notes)
 
 
+def _ensure_verified_deed_registration_details_present(narrative: str, facts: dict) -> str:
+    """Guarantee each Sale Deed's own, correctly-extracted registration_date
+    is present in the chain-of-ownership narrative, the same restrained
+    append-only way as this module's other `_ensure_*` guards — an LLM
+    given several deeds' facts in one prompt is not something this project
+    treats as guaranteed to keep each deed's own identifying details
+    straight.
+
+    Confirmed live with the project's own 3-deed synthetic test set
+    submitted together: the narrative stated Document No. 3010/2012 (a real
+    deed's own registration number) was "registered on 16-07-2012" — but
+    that deed's own text never states that date anywhere; 16-07-2012 is a
+    DIFFERENT deed's separate (and already independently incorrect) recital
+    date for its own unrelated predecessor reference. The model appears to
+    have cross-contaminated a date from one submitted deed's facts into
+    another deed's narrative sentence when generating from multiple deeds
+    in a single prompt.
+
+    Like `_ensure_prior_reference_parties_not_claimed`, this does not
+    attempt to detect or strip the wrong date from the narrative (parsing/
+    editing a specific false claim out of free text is far more fragile
+    than this project's established append-only pattern) — it guarantees
+    each deed's own correct registration_date is also stated, so a
+    reviewer always has the verified figure available even if the model's
+    prose states a different, wrong one elsewhere. Known limitation: this
+    checks PRESENCE of the correct date somewhere in the narrative, not
+    that it's correctly ATTRIBUTED to the right deed — the same limitation
+    `_ensure_verified_party_identities_present` already accepts for names."""
+    missing_lines = []
+    for deed in facts.get("sale_deeds") or []:
+        docnum, regdate = deed.get("document_number"), deed.get("registration_date")
+        if not docnum or not regdate:
+            continue
+        if regdate.lower() not in narrative.lower():
+            missing_lines.append(f"- Sale Deed {docnum}: registration date is {regdate}.")
+
+    if not missing_lines:
+        return narrative
+
+    marker = "verified registration details"
+    if marker in narrative.lower():
+        return narrative
+
+    header = "Note on verified registration details (per extracted records):"
+    return f"{narrative}\n\n{header}\n" + "\n".join(missing_lines)
+
+
 def generate_opinion(
     facts: dict,
     flags: list[Flag],
@@ -391,10 +442,13 @@ Legal Compliance Check, a Risk Flags narrative (restating only the VERIFIED FLAG
 
     return LegalOpinion(
         property_summary=draft.property_summary,
-        chain_of_ownership=_ensure_no_unverified_relationship_claims(
-            _ensure_prior_reference_parties_not_claimed(
-                _ensure_verified_party_identities_present(
-                    _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+        chain_of_ownership=_ensure_verified_deed_registration_details_present(
+            _ensure_no_unverified_relationship_claims(
+                _ensure_prior_reference_parties_not_claimed(
+                    _ensure_verified_party_identities_present(
+                        _ensure_all_transactions_present(draft.chain_of_ownership, facts), facts
+                    ),
+                    facts,
                 ),
                 facts,
             ),

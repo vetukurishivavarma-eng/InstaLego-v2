@@ -280,6 +280,71 @@ right now.
   correctly even on a run where the model's own prose happened not to
   fabricate the relationship — confirming the guard is deterministic and
   doesn't depend on re-observing the bug.
+- **`owner_chain_continuity_check()` was rewritten -- its prior sort-by-
+  registration_date + compare-adjacent-pairs design was order-dependent on
+  submission order whenever two deeds shared a registration_date, which
+  produced a wrong-pairing false positive.** Confirmed live with this
+  project's own 3-deed synthetic test set (`deed_A_2005_standalone.txt` +
+  `deed_B_2012_chainlink.txt`, both dated 15-07-2012 -- a real, expected
+  same-day registration, not a data error): a tie made Python's stable
+  sort fall back to input order, and depending on that order the check
+  could compare Deed B's buyer against Deed A's seller -- the wrong pair
+  entirely -- while the real, correct A->B link (which both deeds' own
+  recitals agree on) went unchecked. Rewritten with two strategies per
+  deed, tried in order: (1) if the deed's own `prior_title_deed_references`
+  resolves by document number to another submitted deed, that's its
+  self-declared predecessor -- compare that specific deed's buyers against
+  this deed's sellers, sidestepping any date tie entirely; (2) otherwise,
+  compare against the buyer(s) of the WHOLE SET of submitted deeds with a
+  strictly earlier date (not one picked "predecessor"), so an internal tie
+  within that set is harmless. A second real gap surfaced while live-
+  testing this fix: a deed's own text can state an execution date without
+  ever separately stating a registration date for that specific document
+  number, so `registration_date` can legitimately be null even though the
+  deed is real and correctly extracted -- strategy 2's date key now falls
+  back to the year embedded in the deed's own `document_number` (the
+  standard Indian "NNNN/YYYY" format) when `registration_date` doesn't
+  parse. That fallback is deliberately compared at YEAR granularity only
+  when mixed with an exact date (never naively as a full `datetime`, which
+  would make a year-only estimate defaulting to January 1st look falsely
+  "earlier" than a same-year deed with a real, later-in-the-year date) --
+  confirmed live this exact naive version produced a new false positive
+  before being caught and fixed the same session. Verified end-to-end
+  against the real 3-deed set: exactly one correct high-severity flag,
+  attributed to the genuinely broken deed, with the clean links quiet.
+- **A Sale Deed's own recital narrating how its seller acquired title is
+  often NOT a sale -- confirmed live it can be a Partition Deed, and the
+  extraction schema had no guidance to preserve that.**
+  `SaleDeed.prior_title_deed_references` had no field description and
+  `extraction/sale_deed.py`'s prompt had no rule about instrument type, so
+  a real recital reading "...acquired the same by way of family partition,
+  evidenced by a registered Partition Deed bearing Document No. 331/1988"
+  was extracted as a bare "Document No. 331/1988, dated 12-01-1988" --
+  losing the instrument type -- and the opinion narrative then defaulted to
+  describing it as a "Sale Deed" in at least one observed run. Fixed by
+  adding an explicit field description and a new extraction prompt rule
+  requiring the instrument type be captured verbatim alongside the number
+  and date, never defaulted to "Sale Deed". The field description was
+  deliberately written WITHOUT a realistic-looking example document number/
+  date (describes the required *shape*, not a copyable value) -- this
+  project already has one confirmed case of a small model copying a
+  plausible example value from a field description verbatim (see
+  `SaleDeed.land_extent` below); repeating that mistake here, using this
+  exact real fixture's own numbers, was caught and corrected before
+  landing. Verified live: the same fixture now correctly extracts
+  "Partition Deed bearing Document No. 331/1988, dated 12-01-1988".
+- **A second variant of the party-relationship confusion above, this time
+  across a submitted MULTI-deed set: the narrative stated one deed's own
+  document number alongside a DIFFERENT deed's date.** Confirmed live: the
+  narrative said Document No. 3010/2012 "was registered on 16-07-2012" --
+  but that deed's own text never states that date; 16-07-2012 is a
+  different, unrelated deed's own (already independently incorrect) recital
+  date. Mitigated (same append-only pattern, not a full fix -- consistent
+  with this module's stance throughout) with
+  `_ensure_verified_deed_registration_details_present()` in
+  `opinion/generator.py`: guarantees each deed's own correct
+  registration_date is present in the narrative somewhere, without editing
+  the model's own (possibly wrong) sentence.
 - **Footnote/amendment lines must be filtered before section-splitting** the
   source Acts, or they get misidentified as section boundaries and corrupt
   the corpus (`legal/corpus_builder.is_footnote_line`).
@@ -307,6 +372,18 @@ right now.
   from the citation-fabrication problem this project already solved; a
   reviewer needs to sanity-check that cited sections are actually
   *applicable*, not just real.
+  **Two more real citations checked the same way, on the live 3-deed run**:
+  "Registration Act, Section 6" (real text: appointment of Registrars/
+  Sub-Registrars -- purely administrative, essentially no relevance to a
+  specific title opinion; the compliance narrative used it to support "the
+  registration of the sale deeds," which Section 6 doesn't actually speak
+  to) and "Transfer of Property Act, Section 3" (real text: the Act's
+  interpretation/definitions clause -- plausibly citable generically when
+  discussing terms like "immoveable property" or "registered," a weaker but
+  not unreasonable use, consistent with the user's own earlier read of
+  Section 3 as legitimate). Both are further evidence for the same
+  systemic retrieval-relevance gap above, not new fabrication findings —
+  no fix attempted this session beyond documenting the pattern.
 
 ## Web API (local)
 
@@ -387,7 +464,7 @@ this section is local-run only.
 
 ## What has and hasn't been run in this environment
 
-127 unit tests pass (`python -m pytest tests/`), covering every pure-logic
+137 unit tests pass (`python -m pytest tests/`), covering every pure-logic
 layer: verification checks (including multi-deed chain continuity), footnote
 filtering/section splitting, EC table flattening, party dedup/merge across
 OCR-garbled chunks, opinion-generator flag/transaction-omission guards, PDF
@@ -409,10 +486,6 @@ gap) and confirming each is caught — plus confirming untouched real fields
 and a released mortgage correctly stay quiet. 9/9 checks behaved as expected.
 
 **Still not run** — these remain open before calling this production-ready:
-- **A full end-to-end run with 2+ real, chronologically-ordered Sale Deeds**,
-  to exercise `owner_chain_continuity_check()` through the actual pipeline
-  (OCR + extraction), not just its unit tests and `trap_test.py`'s synthetic
-  second deed. Only one real historical deed has been sourced so far.
 - The scanned-EC OpenCV grid-detection path (real EC testing so far has only
   covered plain-text/hand-typed tables).
 - Wider extraction testing across different registrars, eras, and scan

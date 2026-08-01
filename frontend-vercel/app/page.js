@@ -9,12 +9,87 @@ function normalizeBaseUrl(url) {
   return url.trim().replace(/\/+$/, "");
 }
 
+// Reads a failed fetch Response and pulls out the best available error
+// message: FastAPI's {"detail": "..."} shape if present, otherwise raw text,
+// otherwise a generic status-based fallback.
+async function extractErrorDetail(response, fallbackPrefix) {
+  let detail = `${fallbackPrefix} (status ${response.status}).`;
+  try {
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      const body = await response.json();
+      if (body && body.detail) detail = body.detail;
+    } else {
+      const text = await response.text();
+      if (text) detail = text;
+    }
+  } catch {
+    // fall back to the generic status-based message above
+  }
+  return detail;
+}
+
+const POLL_INTERVAL_MS = 4000;
+const MAX_POLL_MS = 10 * 60 * 1000; // 10 minutes -- generous vs. observed multi-deed run times
+const MAX_CONSECUTIVE_NETWORK_FAILURES = 5; // ~20s of tolerance for a brief hiccup mid-poll
+
+// Polls GET /opinions/{jobId} until the job reaches "done" or "failed".
+// `onStatus` is called with each intermediate status ("pending"/"running")
+// so the UI can show live progress instead of a single static message.
+// Tolerates a bounded number of consecutive NETWORK-level failures (the
+// fetch itself throwing, e.g. a momentary tunnel/router blip) without
+// aborting -- the whole point of polling instead of one long-held
+// connection is that a brief hiccup shouldn't lose the result, so one
+// failed poll must not be fatal the way one failed long-lived request was.
+// An actual HTTP error response (the backend reachable but returning
+// non-2xx) is still treated as fatal immediately, same as before.
+async function pollJobUntilDone(base, jobId, onStatus) {
+  const start = Date.now();
+  let consecutiveNetworkFailures = 0;
+  for (;;) {
+    if (Date.now() - start > MAX_POLL_MS) {
+      throw new Error(
+        `Still not finished after ${Math.round(MAX_POLL_MS / 60000)} minutes. The job may still complete on ` +
+          `the backend -- its id is ${jobId}, and results are retained for a while after finishing.`
+      );
+    }
+
+    let res;
+    try {
+      res = await fetch(`${base}/opinions/${jobId}`);
+    } catch {
+      consecutiveNetworkFailures += 1;
+      if (consecutiveNetworkFailures > MAX_CONSECUTIVE_NETWORK_FAILURES) {
+        throw new Error(
+          `Lost contact with the backend while checking on this job (id ${jobId}). It may still finish -- ` +
+            `check your connection and try submitting again, or wait and check back.`
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      continue;
+    }
+    consecutiveNetworkFailures = 0;
+
+    if (!res.ok) {
+      throw new Error(await extractErrorDetail(res, "Could not check job status"));
+    }
+    const record = await res.json();
+    if (record.status === "done") return record;
+    if (record.status === "failed") {
+      throw new Error(record.error || "Pipeline failed for an unknown reason.");
+    }
+    onStatus?.(record.status);
+    await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+  }
+}
+
 export default function Home() {
   const [backendUrl, setBackendUrl] = useState(DEFAULT_BACKEND_URL);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
 
   const [status, setStatus] = useState("idle"); // idle | loading | success | error
+  const [jobStatus, setJobStatus] = useState(""); // pending | running, shown while loading
   const [errorMessage, setErrorMessage] = useState("");
   const [pdfUrl, setPdfUrl] = useState(null);
   const [pdfFilename, setPdfFilename] = useState("legal-opinion.pdf");
@@ -91,6 +166,7 @@ export default function Home() {
     }
 
     setStatus("loading");
+    setJobStatus("");
 
     const formData = new FormData();
     for (const file of saleDeedFiles) {
@@ -106,41 +182,46 @@ export default function Home() {
     }
 
     try {
-      // This fetch goes straight from the browser to the ngrok-exposed backend.
-      // It must never be routed through a Next.js API route / serverless function,
-      // since Vercel's free-tier function timeout (~10s) is far shorter than the
-      // several minutes this pipeline can take.
-      const response = await fetch(`${base}/generate-opinion`, {
+      // Submit + poll + download, all going straight from the browser to the
+      // ngrok-exposed backend (never through a Next.js API route / serverless
+      // function -- Vercel's free-tier function timeout (~10s) is far shorter
+      // than this pipeline can take). Deliberately NOT the synchronous
+      // /generate-opinion endpoint: holding one HTTP connection open for the
+      // full multi-minute run proved unreliable in practice (a free ngrok
+      // tunnel or an intermediate router/NAT can drop a long-idle connection
+      // well before the backend actually finishes, even though the backend
+      // itself completes the pipeline correctly) -- confirmed live, the
+      // backend's own logs showed successful completion for a run the
+      // browser had already reported as "Failed to fetch". Polling a short
+      // status endpoint every few seconds never requires any single
+      // connection to survive more than a few seconds.
+      const createResponse = await fetch(`${base}/opinions`, {
         method: "POST",
         body: formData,
       });
 
-      if (!response.ok) {
-        let detail = `Request failed with status ${response.status}.`;
-        try {
-          const contentType = response.headers.get("content-type") || "";
-          if (contentType.includes("application/json")) {
-            const body = await response.json();
-            if (body && body.detail) {
-              detail = body.detail;
-            }
-          } else {
-            const text = await response.text();
-            if (text) detail = text;
-          }
-        } catch {
-          // fall back to the generic status-based message above
-        }
+      if (!createResponse.ok) {
         setStatus("error");
-        setErrorMessage(detail);
+        setErrorMessage(await extractErrorDetail(createResponse, "Could not submit the job"));
         return;
       }
 
-      const blob = await response.blob();
+      const { job_id: jobId } = await createResponse.json();
+      setJobStatus("pending");
+      await pollJobUntilDone(base, jobId, setJobStatus);
+
+      const downloadResponse = await fetch(`${base}/opinions/${jobId}/download`);
+      if (!downloadResponse.ok) {
+        setStatus("error");
+        setErrorMessage(await extractErrorDetail(downloadResponse, "Job finished but the PDF could not be downloaded"));
+        return;
+      }
+
+      const blob = await downloadResponse.blob();
       const objectUrl = URL.createObjectURL(blob);
       setPdfUrl(objectUrl);
 
-      const disposition = response.headers.get("content-disposition") || "";
+      const disposition = downloadResponse.headers.get("content-disposition") || "";
       const match = disposition.match(/filename="?([^"]+)"?/i);
       if (match && match[1]) {
         setPdfFilename(match[1]);
@@ -234,8 +315,10 @@ export default function Home() {
 
       {status === "loading" && (
         <div className="statusBox loading">
-          Processing… this can take several minutes (OCR plus several sequential
-          LLM calls on the backend). Please keep this tab open.
+          Processing{jobStatus ? ` (${jobStatus})` : "…"} — this can take several minutes (OCR
+          plus several sequential LLM calls on the backend). Keep this tab open; it checks in
+          with the backend every few seconds rather than holding one long connection open, so a
+          brief network hiccup won&apos;t lose your result the way it used to.
         </div>
       )}
 
